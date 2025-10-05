@@ -12,9 +12,12 @@ from kpipe.async_pipeline import (
     AsyncSelectPipe,
     AsyncParallelPipe,
     AsyncMetadataWrapperPipe,
+    AsyncMapPipe,
+    AsyncFilterPipe,
+    AsyncRetryPipe,
 )
 
-from .test_pipeline import MulPipe
+from .test_pipeline import MulPipe, FailingPipe
 
 
 # ----------------------------------------------------------------------
@@ -248,4 +251,67 @@ async def test_multiple_async_chain_composition():
 def test_async_pipe_cannot_be_instantiated_directly():
     with pytest.raises(TypeError):
         AsyncPipe()  # type: ignore
+
+
+# ----------------------------------------------------------------------
+# AsyncMapPipe
+# ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_async_map_pipe():
+    pipe = AsyncMapPipe(MulPipe())
+    result = await pipe.apply([1, 2], None)
+    assert result == [2, 4]
+
+    g = pipe.to_graph()
+    assert isinstance(g, Graph)
+    assert g.is_valid()
+
+
+# ----------------------------------------------------------------------
+# AsyncFilterPipe
+# ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_async_filter_pipe():
+    async def async_pred(x, m):
+        await asyncio.sleep(0)
+        return x > 0
+
+    pipe = AsyncFilterPipe(predicate=async_pred)
+    result = await pipe.apply([-1, 0, 5, 2], None)
+    assert result == [5, 2]
+
+    g = pipe.to_graph()
+    assert isinstance(g, Graph)
+    assert g.is_valid()
+
+
+# ----------------------------------------------------------------------
+# AsyncRetryPipe
+# ----------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_async_retry_pipe_successful_retry():
+    async_pipe = AsyncRetryPipe(subpipe=FailingPipe(), retries=2, exceptions=RuntimeError)
+    # Same logic as the sync test – first attempt fails, second succeeds
+    assert await async_pipe.apply(7, None) == 14
+
+    g = async_pipe.to_graph()
+    assert isinstance(g, Graph)
+    assert g.is_valid()
+
+
+@pytest.mark.asyncio
+async def test_async_retry_pipe_exhausts():
+    class AsyncAlwaysFail(AsyncPipe[int, int, None]):  # type: ignore[misc]
+        async def apply(self, input: int, metadata: None) -> int:
+            raise RuntimeError("always fail")
+
+        def to_graph(self) -> Graph:  # pragma: no cover
+            node = self.to_node()
+            return Graph(nodes=(node,), connections=(), inputs=(node.id,), outputs=(node.id,))
+
+    pipe = AsyncRetryPipe(subpipe=AsyncAlwaysFail(), retries=0, exceptions=RuntimeError)
+    with pytest.raises(RuntimeError):
+        await pipe.apply(42, None)
 

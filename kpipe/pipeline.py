@@ -27,12 +27,28 @@ class BasePipe[Input, Output, Metadata](ABC):
     def to_node(self) -> GraphNode:
         return GraphNode(id=str(id(self)), type=type(self), title="Pipe")
 
+    def get_subgraph(self) -> Optional[Graph]:
+        return None
+
+    def is_wrapper(self) -> bool:
+        return False
+
     def to_graph(self) -> Graph:
         """
         Return the pipeline as a graph.
         """
-        node = self.to_node()
-        return Graph(nodes=(node,), connections=(), inputs=(node.id,), outputs=(node.id,))
+        if subgraph := self.get_subgraph():
+            node = self.to_node()._replace(subgraph=subgraph)
+            return Graph(
+                nodes=(node,),
+                connections=(),
+                inputs=subgraph.inputs if self.is_wrapper() else (node.id,),
+                outputs=subgraph.outputs if self.is_wrapper() else (node.id,),
+            )
+
+        else:
+            node = self.to_node()
+            return Graph(nodes=(node,), connections=(), inputs=(node.id,), outputs=(node.id,))
 
 
 class Pipe[Input, Output, Metadata](BasePipe[Input, Output, Metadata]):
@@ -45,6 +61,17 @@ class Pipe[Input, Output, Metadata](BasePipe[Input, Output, Metadata]):
         Alias for Pipe.chain.
         """
         return self.chain(other)
+
+
+type PipeOrCallable[I, O, M] = Callable[[I, M], O] | Pipe[I, O, M]
+
+
+def _call_or_apply[I, O, M](f: PipeOrCallable[I, O, M], i: I, m: M) -> O:
+    if isinstance(f, Pipe):
+        return f.apply(i, m)
+
+    else:
+        return f(i, m)
 
 
 @dataclass(frozen=True)
@@ -69,20 +96,20 @@ class BranchPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
     """
     Selects one of two pipes to apply based on a condition.
     """
-    condition: Callable[[Input, Metadata], bool]
+    condition: PipeOrCallable[Input, bool, Metadata]
     then_pipe: Pipe[Input, Output, Metadata]
     else_pipe: Pipe[Input, Output, Metadata]
-    description: str = ""
+    description: str = "Condition"
 
     def apply(self, input: Input, metadata: Metadata) -> Output:
-        if self.condition(input, metadata):
+        if _call_or_apply(self.condition, input, metadata):
             return self.then_pipe.apply(input, metadata)
 
         else:
             return self.else_pipe.apply(input, metadata)
 
     def to_graph(self) -> Graph:
-        condition_node = self.to_node()._replace(title=self.description or "Condition", shape="condition")
+        condition_node = self.to_node()._replace(title=self.description, shape="condition", subgraph=self.condition.to_graph() if isinstance(self.condition, Pipe) else None)
         then_graph = self.then_pipe.to_graph()
         else_graph = self.else_pipe.to_graph()
         return (
@@ -105,7 +132,7 @@ class ConditionalPipe[InputOutput, Metadata](Pipe[InputOutput, InputOutput, Meta
     """
     condition: Callable[[InputOutput, Metadata], bool]
     subpipe: Pipe[InputOutput, InputOutput, Metadata]
-    description: str = ""
+    description: str = "Condition"
 
     def apply(self, input: InputOutput, metadata: Metadata) -> InputOutput:
         if self.condition(input, metadata):
@@ -114,15 +141,14 @@ class ConditionalPipe[InputOutput, Metadata](Pipe[InputOutput, InputOutput, Meta
         else:
             return input
 
-    def to_graph(self) -> Graph:
-        subpipe_graph = self.subpipe.to_graph()
-        condition_node = self.to_node()._replace(title=self.description or "Condition", subgraph=subpipe_graph)
-        return Graph(
-            nodes=(condition_node,),
-            connections=(),
-            inputs=subpipe_graph.inputs,
-            outputs=subpipe_graph.outputs,
-        )
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+    def is_wrapper(self) -> bool:
+        return True
 
 
 @dataclass(frozen=True)
@@ -130,13 +156,13 @@ class SelectPipe[Input, Output, Metadata, Key](Pipe[Input, Output, Metadata]):
     """
     Selects one of multiple pipes based on a selector function. BranchPipe generalized to more than two branches.
     """
-    key: Callable[[Input, Metadata], Key]
+    key: PipeOrCallable[Input, Key, Metadata]
     subpipes: Mapping[Key, Pipe[Input, Output, Metadata]]
     otherwise_pipe: Pipe[Input, Output, Metadata]
-    description: str = ""
+    description: str = "Key"
 
     def apply(self, input: Input, metadata: Metadata) -> Output:
-        key = self.key(input, metadata)
+        key = _call_or_apply(self.key, input, metadata)
         if key in self.subpipes:
             return self.subpipes[key].apply(input, metadata)
 
@@ -144,7 +170,7 @@ class SelectPipe[Input, Output, Metadata, Key](Pipe[Input, Output, Metadata]):
             return self.otherwise_pipe.apply(input, metadata)
 
     def to_graph(self) -> Graph:
-        condition_node = self.to_node()._replace(title=self.description or "Condition", shape="condition")
+        condition_node = self.to_node()._replace(title=self.description, shape="condition", subgraph=self.key.to_graph() if isinstance(self.key, Pipe) else None)
         otherwise_graph = self.otherwise_pipe.to_graph()
         graph = otherwise_graph.add(
             nodes=(condition_node,),
@@ -165,18 +191,19 @@ class ParallelPipe[Input, Output, CombinedOutput, Metadata](Pipe[Input, Combined
     The synchronous implementation does not actually execute the pipes in parallel.
     """
     subpipes: Sequence[Pipe[Input, Output, Metadata]]
-    combine: Callable[[Iterable[Output], Metadata], CombinedOutput]
-    description: str = ""
+    combine: PipeOrCallable[Sequence[Output], CombinedOutput, Metadata]
+    description: str = "Combine results"
 
     def apply(self, input: Input, metadata: Metadata) -> CombinedOutput:
         results = []
         for subpipe in self.subpipes:
             results.append(subpipe.apply(input, metadata))
 
-        return self.combine(results, metadata)
+        seq: Sequence[Output] = results
+        return _call_or_apply(self.combine, seq, metadata)
 
     def to_graph(self) -> Graph:
-        combine_node = self.to_node()._replace(title=self.description or "Combine results", shape="combine")
+        combine_node = self.to_node()._replace(title=self.description, shape="combine", subgraph=self.combine.to_graph() if isinstance(self.combine, Pipe) else None)
         graph = Graph(nodes=(combine_node,))
         for subpipe in self.subpipes:
             subpipe_graph = subpipe.to_graph()
@@ -190,21 +217,94 @@ class ParallelPipe[Input, Output, CombinedOutput, Metadata](Pipe[Input, Combined
 class MetadataWrapperPipe[Input, Output, OuterMetadata, InnerMetadata](Pipe[Input, Output, OuterMetadata]):
     """
     Executes a pipe with changed metadata.
+
+    Does NOT allow to_inner to be a pipe: this is intentional, metadata is not transformed by pipes.
     """
     to_inner: Callable[[OuterMetadata], InnerMetadata]
     subpipe: Pipe[Input, Output, InnerMetadata]
-    description: str = ""
+    description: str = "Wrap metadata"
 
     def apply(self, input: Input, metadata: OuterMetadata) -> Output:
         return self.subpipe.apply(input, self.to_inner(metadata))
 
-    def to_graph(self) -> Graph:
-        subpipe_graph = self.subpipe.to_graph()
-        wrapper_node = self.to_node()._replace(title=self.description or "Wrap metadata", subgraph=subpipe_graph)
-        return Graph(
-            nodes=(wrapper_node,),
-            connections=(),
-            inputs=subpipe_graph.inputs,
-            outputs=subpipe_graph.outputs,
-        )
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+    def is_wrapper(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class MapPipe[Input, Output, Metadata](Pipe[Sequence[Input], Sequence[Output], Metadata]):
+    """
+    Maps a sequence of input objects into a sequence of output objects with a subpipe.
+
+    Does NOT allow the subpipe to be a callable: this is intentional, functions that transforms Inputs to Outputs should be pipes.
+    """
+    subpipe: Pipe[Input, Output, Metadata]
+    description: str = "Map"
+
+    def apply(self, input: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        return [self.subpipe.apply(i, metadata) for i in input]
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+
+@dataclass(frozen=True)
+class FilterPipe[Input, Metadata](Pipe[Sequence[Input], Sequence[Input], Metadata]):
+    """
+    Filters a sequence of input object with a predicate.
+    """
+    predicate: PipeOrCallable[Input, bool, Metadata]
+    description: str = "Filter"
+
+    def apply(self, input: Sequence[Input], metadata: Metadata) -> Sequence[Input]:
+        return [i for i in input if _call_or_apply(self.predicate, i, metadata)]
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.predicate.to_graph() if isinstance(self.predicate, Pipe) else None
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+
+@dataclass(frozen=True)
+class RetryPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
+    """
+    Tries to execute the subpipe several times in case it fails.
+    """
+    subpipe: Pipe[Input, Output, Metadata]
+    retries: int
+    exceptions: type | tuple[type, ...]
+    description: str = "Retry several times"
+
+    def apply(self, input: Input, metadata: Metadata) -> Output:
+        attempt = 0
+        while True:
+            try:
+                return self.subpipe.apply(input, metadata)
+
+            except Exception as e:
+                if not isinstance(e, self.exceptions):
+                    raise e
+
+                attempt += 1
+                if attempt > self.retries:
+                    raise e
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+    def is_wrapper(self) -> bool:
+        return True
 

@@ -16,6 +16,9 @@ from kpipe.pipeline import (
     SelectPipe,
     ParallelPipe,
     MetadataWrapperPipe,
+    MapPipe,
+    FilterPipe,
+    RetryPipe,
 )
 
 # ----------------------------------------------------------------------
@@ -220,5 +223,78 @@ def test_pipe_cannot_be_instantiated_directly():
     with pytest.raises(TypeError):
         Pipe()  # type: ignore
 
+
+# ----------------------------------------------------------------------
+# Helper concrete pipes used by the tests
+# ----------------------------------------------------------------------
+
+
+class FailingPipe(Pipe[int, int, None]):  # type: ignore[misc]
+    """Pipe that raises on the first call, then succeeds."""
+    _called: bool = False
+
+    def apply(self, input: int, metadata: None) -> int:  # noqa: D401
+        if not getattr(self, "_called", False):
+            self.__dict__["_called"] = True
+            raise RuntimeError("first failure")
+        return input * 2
+
+    def to_graph(self) -> Graph:  # pragma: no cover
+        node = self.to_node()
+        return Graph(nodes=(node,), connections=(), inputs=(node.id,), outputs=(node.id,))
+
+
+# ----------------------------------------------------------------------
+# MapPipe
+# ----------------------------------------------------------------------
+
+def test_map_pipe():
+    pipe = MapPipe(MulPipe())
+    assert pipe.apply([1, 2, 3], None) == [2, 4, 6]
+
+    g = pipe.to_graph()
+    assert isinstance(g, Graph)
+    assert g.is_valid()
+
+
+# ----------------------------------------------------------------------
+# FilterPipe
+# ----------------------------------------------------------------------
+
+def test_filter_pipe():
+    pred = lambda x, m: x % 2 == 0
+    pipe = FilterPipe(predicate=pred)
+    assert pipe.apply([1, 2, 3, 4], None) == [2, 4]
+
+    g = pipe.to_graph()
+    assert isinstance(g, Graph)
+    assert g.is_valid()
+
+# ----------------------------------------------------------------------
+# RetryPipe
+# ----------------------------------------------------------------------
+
+def test_retry_pipe_successful_retry():
+    pipe = RetryPipe(subpipe=FailingPipe(), retries=2, exceptions=RuntimeError)
+    # First call fails, second succeeds -> result should be 5*2 = 10
+    assert pipe.apply(5, None) == 10
+
+    g = pipe.to_graph()
+    assert isinstance(g, Graph)
+    assert g.is_valid()
+
+
+def test_retry_pipe_exhausts():
+    class AlwaysFail(Pipe[int, int, None]):  # type: ignore[misc]
+        def apply(self, input: int, metadata: None) -> int:  # noqa: D401
+            raise RuntimeError("always fail")
+
+        def to_graph(self) -> Graph:  # pragma: no cover
+            node = self.to_node()
+            return Graph(nodes=(node,), connections=(), inputs=(node.id,), outputs=(node.id,))
+
+    pipe = RetryPipe(subpipe=AlwaysFail(), retries=1, exceptions=RuntimeError)
+    with pytest.raises(RuntimeError):
+        pipe.apply(1, None)
 
 

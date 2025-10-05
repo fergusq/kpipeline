@@ -36,6 +36,17 @@ async def _await_or_return[T](data: T | Awaitable[T]) -> T:
         return data
 
 
+type SyncOrAsyncPipeOrCallable[I, O, M] = Callable[[I, M], O] | Callable[[I, M], Awaitable[O]] | SyncOrAsyncPipe[I, O, M]
+
+
+async def _call_or_apply[I, O, M](f: SyncOrAsyncPipeOrCallable[I, O, M], i: I, m: M) -> O:
+    if isinstance(f, BasePipe):
+        return await _await_or_return(f.apply(i, m))
+
+    else:
+        return await _await_or_return(f(i, m))
+
+
 @dataclass(frozen=True)
 class AsyncChainPipe[Input, Middle, Output, Metadata](AsyncPipe[Input, Output, Metadata]):
     """
@@ -59,20 +70,20 @@ class AsyncBranchPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata
     """
     Selects one of two pipes to apply based on a condition.
     """
-    condition: Callable[[Input, Metadata], bool | Awaitable[bool]]
+    condition: SyncOrAsyncPipeOrCallable[Input, bool, Metadata]
     then_pipe: SyncOrAsyncPipe[Input, Output, Metadata]
     else_pipe: SyncOrAsyncPipe[Input, Output, Metadata]
     description: str = ""
 
     async def apply(self, input: Input, metadata: Metadata) -> Output:
-        if await _await_or_return(self.condition(input, metadata)):
+        if await _call_or_apply(self.condition, input, metadata):
             return await _await_or_return(self.then_pipe.apply(input, metadata))
 
         else:
             return await _await_or_return(self.else_pipe.apply(input, metadata))
 
     def to_graph(self) -> Graph:
-        condition_node = self.to_node()._replace(title=self.description or "Condition", shape="condition")
+        condition_node = self.to_node()._replace(title=self.description or "Condition", shape="condition", subgraph=self.condition.to_graph() if isinstance(self.condition, Pipe) else None)
         then_graph = self.then_pipe.to_graph()
         else_graph = self.else_pipe.to_graph()
         return (
@@ -104,15 +115,14 @@ class AsyncConditionalPipe[InputOutput, Metadata](AsyncPipe[InputOutput, InputOu
         else:
             return input
 
-    def to_graph(self) -> Graph:
-        subpipe_graph = self.subpipe.to_graph()
-        condition_node = self.to_node()._replace(title=self.description or "Condition", subgraph=subpipe_graph)
-        return Graph(
-            nodes=(condition_node,),
-            connections=(),
-            inputs=subpipe_graph.inputs,
-            outputs=subpipe_graph.outputs,
-        )
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+    def is_wrapper(self) -> bool:
+        return True
 
 
 @dataclass(frozen=True)
@@ -120,13 +130,13 @@ class AsyncSelectPipe[Input, Output, Metadata, Key](AsyncPipe[Input, Output, Met
     """
     Selects one of multiple pipes based on a selector function. AsyncBranchPipe generalized to more than two branches.
     """
-    key: Callable[[Input, Metadata], Key | Awaitable[Key]]
+    key: SyncOrAsyncPipeOrCallable[Input, Key, Metadata]
     subpipes: Mapping[Key, SyncOrAsyncPipe[Input, Output, Metadata]]
     otherwise_pipe: SyncOrAsyncPipe[Input, Output, Metadata]
     description: str = ""
 
     async def apply(self, input: Input, metadata: Metadata) -> Output:
-        key = await _await_or_return(self.key(input, metadata))
+        key = await _call_or_apply(self.key, input, metadata)
         if key in self.subpipes:
             return await _await_or_return(self.subpipes[key].apply(input, metadata))
 
@@ -134,7 +144,7 @@ class AsyncSelectPipe[Input, Output, Metadata, Key](AsyncPipe[Input, Output, Met
             return await _await_or_return(self.otherwise_pipe.apply(input, metadata))
 
     def to_graph(self) -> Graph:
-        condition_node = self.to_node()._replace(title=self.description or "Condition", shape="condition")
+        condition_node = self.to_node()._replace(title=self.description or "Condition", shape="condition", subgraph=self.key.to_graph() if isinstance(self.key, Pipe) else None)
         otherwise_graph = self.otherwise_pipe.to_graph()
         graph = otherwise_graph.add(
             nodes=(condition_node,),
@@ -154,7 +164,7 @@ class AsyncParallelPipe[Input, Output, CombinedOutput, Metadata](AsyncPipe[Input
     Executes multiple pipes in parallel on the same input and combines the outputs.
     """
     subpipes: Sequence[SyncOrAsyncPipe[Input, Output, Metadata]]
-    combine: Callable[[Iterable[Output], Metadata], CombinedOutput | Awaitable[CombinedOutput]]
+    combine: SyncOrAsyncPipeOrCallable[Sequence[Output], CombinedOutput, Metadata]
     description: str = ""
 
     async def apply(self, input: Input, metadata: Metadata) -> CombinedOutput:
@@ -162,10 +172,11 @@ class AsyncParallelPipe[Input, Output, CombinedOutput, Metadata](AsyncPipe[Input
         for subpipe in self.subpipes:
             results.append(_await_or_return(subpipe.apply(input, metadata)))
 
-        return await _await_or_return(self.combine(await asyncio.gather(*results), metadata))
+        gathered: Sequence[Output] = await asyncio.gather(*results)
+        return await _call_or_apply(self.combine, gathered, metadata)
 
     def to_graph(self) -> Graph:
-        combine_node = self.to_node()._replace(title=self.description or "Combine results", shape="combine")
+        combine_node = self.to_node()._replace(title=self.description or "Combine results", shape="combine", subgraph=self.combine.to_graph() if isinstance(self.combine, Pipe) else None)
         graph = Graph(nodes=(combine_node,))
         for subpipe in self.subpipes:
             subpipe_graph = subpipe.to_graph()
@@ -179,6 +190,8 @@ class AsyncParallelPipe[Input, Output, CombinedOutput, Metadata](AsyncPipe[Input
 class AsyncMetadataWrapperPipe[Input, Output, OuterMetadata, InnerMetadata](AsyncPipe[Input, Output, OuterMetadata]):
     """
     Executes a pipe with changed metadata.
+
+    Does NOT allow to_inner to be a pipe: this is intentional, metadata is not transformed by pipes.
     """
     to_inner: Callable[[OuterMetadata], InnerMetadata | Awaitable[InnerMetadata]]
     subpipe: SyncOrAsyncPipe[Input, Output, InnerMetadata]
@@ -187,13 +200,84 @@ class AsyncMetadataWrapperPipe[Input, Output, OuterMetadata, InnerMetadata](Asyn
     async def apply(self, input: Input, metadata: OuterMetadata) -> Output:
         return await _await_or_return(self.subpipe.apply(input, await _await_or_return(self.to_inner(metadata))))
 
-    def to_graph(self) -> Graph:
-        subpipe_graph = self.subpipe.to_graph()
-        wrapper_node = self.to_node()._replace(title=self.description or "Wrap metadata", subgraph=subpipe_graph)
-        return Graph(
-            nodes=(wrapper_node,),
-            connections=(),
-            inputs=subpipe_graph.inputs,
-            outputs=subpipe_graph.outputs,
-        )
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+    def is_wrapper(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class AsyncMapPipe[Input, Output, Metadata](AsyncPipe[Sequence[Input], Sequence[Output], Metadata]):
+    """
+    Maps a sequence of input objects into a sequence of output objects with a subpipe.
+
+    Does NOT allow the subpipe to be a callable: this is intentional, functions that transforms Inputs to Outputs should be pipes.
+    """
+    subpipe: SyncOrAsyncPipe[Input, Output, Metadata]
+    description: str = "Map"
+
+    async def apply(self, input: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        return [await _await_or_return(self.subpipe.apply(i, metadata)) for i in input]
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+
+@dataclass(frozen=True)
+class AsyncFilterPipe[Input, Metadata](AsyncPipe[Sequence[Input], Sequence[Input], Metadata]):
+    """
+    Filters a sequence of input object with a predicate.
+    """
+    predicate: SyncOrAsyncPipeOrCallable[Input, bool, Metadata]
+    description: str = "Filter"
+
+    async def apply(self, input: Sequence[Input], metadata: Metadata) -> Sequence[Input]:
+        return [i for i in input if await _call_or_apply(self.predicate, i, metadata)]
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.predicate.to_graph() if isinstance(self.predicate, Pipe) else None
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+
+@dataclass(frozen=True)
+class AsyncRetryPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata]):
+    """
+    Tries to execute the subpipe several times in case it fails.
+    """
+    subpipe: SyncOrAsyncPipe[Input, Output, Metadata]
+    retries: int
+    exceptions: type | tuple[type, ...]
+    description: str = "Retry several times"
+
+    async def apply(self, input: Input, metadata: Metadata) -> Output:
+        attempt = 0
+        while True:
+            try:
+                return await _await_or_return(self.subpipe.apply(input, metadata))
+
+            except Exception as e:
+                if not isinstance(e, self.exceptions):
+                    raise e
+
+                attempt += 1
+                if attempt > self.retries:
+                    raise e
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+    def is_wrapper(self) -> bool:
+        return True
 
