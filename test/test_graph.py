@@ -2,7 +2,7 @@ import builtins
 import types
 import pytest
 
-from kpipe.graph import (
+from kpipeline.graph import (
     Graph,
     GraphNode,
     GraphConnection,

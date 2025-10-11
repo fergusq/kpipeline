@@ -3,8 +3,8 @@ import builtins
 from typing import Iterable
 import pytest
 
-from kpipe.graph import Graph, GraphNode, GraphConnection
-from kpipe.async_pipeline import (
+from kpipeline.graph import Graph, GraphNode, GraphConnection
+from kpipeline.async_pipeline import (
     AsyncPipe,
     AsyncChainPipe,
     AsyncBranchPipe,

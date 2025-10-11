@@ -1,5 +1,5 @@
 [project]
-name = "kpipe"
+name = "kpipeline"
 version = "0.1.0"
 description = "A pipeline library for Python"
 readme = "README.md"
