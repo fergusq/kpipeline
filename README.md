@@ -9,7 +9,7 @@ kpipe is like a DSL language inside Python. It is based on "pipes" which can be 
 Each pipe represents a function transforming an input into an output. Pipes are stateless and immutable. Below is an example defining two example pipes.
 
 ```python
-from kpipe.pipeline import Pipe
+from kpipeline import Pipe
 
 class AddOnePipe(Pipe[int, int, None]):
     def apply(self, input: int, metadata: None) -> int:
@@ -28,7 +28,7 @@ pipeline = AddOnePipe() | MulByTwoPipe()
 
 # or
 
-from kpipe.pipeline import ChainPipe
+from kpipeline import ChainPipe
 pipeline = ChainPipe(AddOnePipe(), MulByTwoPipe())
 
 print(pipeline.apply(2))  # 6
