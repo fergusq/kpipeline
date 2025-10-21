@@ -92,6 +92,15 @@ class ChainPipe[Input, Middle, Output, Metadata](Pipe[Input, Output, Metadata]):
 
 
 @dataclass(frozen=True)
+class IdentityPipe[InputOutput, Metadata](Pipe[InputOutput, InputOutput, Metadata]):
+    """
+    A pipe that returns its input.
+    """
+    def apply(self, input: InputOutput, metadata: Metadata) -> InputOutput:
+        return input
+
+
+@dataclass(frozen=True)
 class BranchPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
     """
     Selects one of two pipes to apply based on a condition.
