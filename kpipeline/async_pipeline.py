@@ -66,7 +66,7 @@ class AsyncChainPipe[Input, Middle, Output, Metadata](AsyncPipe[Input, Output, M
 
 
 @dataclass(frozen=True)
-class AsyncIdentityPipe[InputOutput, Metadata](Pipe[InputOutput, InputOutput, Metadata]):
+class AsyncIdentityPipe[InputOutput, Metadata](AsyncPipe[InputOutput, InputOutput, Metadata]):
     """
     A pipe that returns its input.
     """
