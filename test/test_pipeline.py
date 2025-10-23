@@ -30,15 +30,15 @@ from kpipeline.pipeline import (
 class AddPipe(Pipe[int, int, None]):
     """Adds 1 to the incoming integer."""
 
-    def apply(self, input: int, metadata: None) -> int:  # type: ignore[override]
-        return input + 1
+    def apply(self, data: int, metadata: None) -> int:  # type: ignore[override]
+        return data + 1
 
 
 class MulPipe(Pipe[int, int, None]):
     """Multiplies the incoming integer by 2."""
 
-    def apply(self, input: int, metadata: None) -> int:  # type: ignore[override]
-        return input * 2
+    def apply(self, data: int, metadata: None) -> int:  # type: ignore[override]
+        return data * 2
 
 
 # ----------------------------------------------------------------------
@@ -233,11 +233,11 @@ class FailingPipe(Pipe[int, int, None]):  # type: ignore[misc]
     """Pipe that raises on the first call, then succeeds."""
     _called: bool = False
 
-    def apply(self, input: int, metadata: None) -> int:  # noqa: D401
+    def apply(self, data: int, metadata: None) -> int:  # noqa: D401
         if not getattr(self, "_called", False):
             self.__dict__["_called"] = True
             raise RuntimeError("first failure")
-        return input * 2
+        return data * 2
 
     def to_graph(self) -> Graph:  # pragma: no cover
         node = self.to_node()
@@ -286,7 +286,7 @@ def test_retry_pipe_successful_retry():
 
 def test_retry_pipe_exhausts():
     class AlwaysFail(Pipe[int, int, None]):  # type: ignore[misc]
-        def apply(self, input: int, metadata: None) -> int:  # noqa: D401
+        def apply(self, data: int, metadata: None) -> int:  # noqa: D401
             raise RuntimeError("always fail")
 
         def to_graph(self) -> Graph:  # pragma: no cover

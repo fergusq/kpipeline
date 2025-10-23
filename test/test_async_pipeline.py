@@ -28,15 +28,15 @@ from .test_pipeline import MulPipe, FailingPipe
 class AsyncAddPipe(AsyncPipe[int, int, None]):  # type: ignore[misc]
     """Async version of ``AddPipe`` – adds 1 to the incoming integer."""
 
-    async def apply(self, input: int, metadata: None) -> int:  # noqa: D401
-        return input + 1
+    async def apply(self, data: int, metadata: None) -> int:  # noqa: D401
+        return data + 1
 
 
 class AsyncMulPipe(AsyncPipe[int, int, None]):  # type: ignore[misc]
     """Async version of ``MulPipe`` – multiplies the incoming integer by 2."""
 
-    async def apply(self, input: int, metadata: None) -> int:  # noqa: D401
-        return input * 2
+    async def apply(self, data: int, metadata: None) -> int:  # noqa: D401
+        return data * 2
 
 
 # ----------------------------------------------------------------------
@@ -304,7 +304,7 @@ async def test_async_retry_pipe_successful_retry():
 @pytest.mark.asyncio
 async def test_async_retry_pipe_exhausts():
     class AsyncAlwaysFail(AsyncPipe[int, int, None]):  # type: ignore[misc]
-        async def apply(self, input: int, metadata: None) -> int:
+        async def apply(self, data: int, metadata: None) -> int:
             raise RuntimeError("always fail")
 
         def to_graph(self) -> Graph:  # pragma: no cover

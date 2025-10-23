@@ -12,7 +12,7 @@ class BasePipe[Input, Output, Metadata](ABC):
     """
 
     @abstractmethod
-    def apply(self, input: Input, metadata: Metadata) -> Output:
+    def apply(self, data: Input, metadata: Metadata) -> Output:
         """
         Apply the pipe to the given input data and return the result.
         """
@@ -66,12 +66,12 @@ class Pipe[Input, Output, Metadata](BasePipe[Input, Output, Metadata]):
 type PipeOrCallable[I, O, M] = Callable[[I, M], O] | Pipe[I, O, M]
 
 
-def _call_or_apply[I, O, M](f: PipeOrCallable[I, O, M], i: I, m: M) -> O:
+def _call_or_apply[I, O, M](f: PipeOrCallable[I, O, M], d: I, m: M) -> O:
     if isinstance(f, Pipe):
-        return f.apply(i, m)
+        return f.apply(d, m)
 
     else:
-        return f(i, m)
+        return f(d, m)
 
 
 @dataclass(frozen=True)
@@ -82,8 +82,8 @@ class ChainPipe[Input, Middle, Output, Metadata](Pipe[Input, Output, Metadata]):
     pipe1: BasePipe[Input, Middle, Metadata]
     pipe2: BasePipe[Middle, Output, Metadata]
 
-    def apply(self, input: Input, metadata: Metadata) -> Output:
-        return self.pipe2.apply(self.pipe1.apply(input, metadata), metadata)
+    def apply(self, data: Input, metadata: Metadata) -> Output:
+        return self.pipe2.apply(self.pipe1.apply(data, metadata), metadata)
 
     def to_graph(self) -> Graph:
         graph1 = self.pipe1.to_graph()
@@ -96,8 +96,8 @@ class IdentityPipe[InputOutput, Metadata](Pipe[InputOutput, InputOutput, Metadat
     """
     A pipe that returns its input.
     """
-    def apply(self, input: InputOutput, metadata: Metadata) -> InputOutput:
-        return input
+    def apply(self, data: InputOutput, metadata: Metadata) -> InputOutput:
+        return data
 
 
 @dataclass(frozen=True)
@@ -110,12 +110,12 @@ class BranchPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
     else_pipe: Pipe[Input, Output, Metadata]
     description: str = "Condition"
 
-    def apply(self, input: Input, metadata: Metadata) -> Output:
-        if _call_or_apply(self.condition, input, metadata):
-            return self.then_pipe.apply(input, metadata)
+    def apply(self, data: Input, metadata: Metadata) -> Output:
+        if _call_or_apply(self.condition, data, metadata):
+            return self.then_pipe.apply(data, metadata)
 
         else:
-            return self.else_pipe.apply(input, metadata)
+            return self.else_pipe.apply(data, metadata)
 
     def to_graph(self) -> Graph:
         condition_node = self.to_node()._replace(title=self.description, shape="condition", subgraph=self.condition.to_graph() if isinstance(self.condition, Pipe) else None)
@@ -143,12 +143,12 @@ class ConditionalPipe[InputOutput, Metadata](Pipe[InputOutput, InputOutput, Meta
     subpipe: Pipe[InputOutput, InputOutput, Metadata]
     description: str = "Condition"
 
-    def apply(self, input: InputOutput, metadata: Metadata) -> InputOutput:
-        if self.condition(input, metadata):
-            return self.subpipe.apply(input, metadata)
+    def apply(self, data: InputOutput, metadata: Metadata) -> InputOutput:
+        if self.condition(data, metadata):
+            return self.subpipe.apply(data, metadata)
 
         else:
-            return input
+            return data
 
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
@@ -170,13 +170,13 @@ class SelectPipe[Input, Output, Metadata, Key](Pipe[Input, Output, Metadata]):
     otherwise_pipe: Pipe[Input, Output, Metadata]
     description: str = "Key"
 
-    def apply(self, input: Input, metadata: Metadata) -> Output:
-        key = _call_or_apply(self.key, input, metadata)
+    def apply(self, data: Input, metadata: Metadata) -> Output:
+        key = _call_or_apply(self.key, data, metadata)
         if key in self.subpipes:
-            return self.subpipes[key].apply(input, metadata)
+            return self.subpipes[key].apply(data, metadata)
 
         else:
-            return self.otherwise_pipe.apply(input, metadata)
+            return self.otherwise_pipe.apply(data, metadata)
 
     def to_graph(self) -> Graph:
         condition_node = self.to_node()._replace(title=self.description, shape="condition", subgraph=self.key.to_graph() if isinstance(self.key, Pipe) else None)
@@ -203,10 +203,10 @@ class ParallelPipe[Input, Output, CombinedOutput, Metadata](Pipe[Input, Combined
     combine: PipeOrCallable[Sequence[Output], CombinedOutput, Metadata]
     description: str = "Combine results"
 
-    def apply(self, input: Input, metadata: Metadata) -> CombinedOutput:
+    def apply(self, data: Input, metadata: Metadata) -> CombinedOutput:
         results = []
         for subpipe in self.subpipes:
-            results.append(subpipe.apply(input, metadata))
+            results.append(subpipe.apply(data, metadata))
 
         seq: Sequence[Output] = results
         return _call_or_apply(self.combine, seq, metadata)
@@ -233,8 +233,8 @@ class MetadataWrapperPipe[Input, Output, OuterMetadata, InnerMetadata](Pipe[Inpu
     subpipe: Pipe[Input, Output, InnerMetadata]
     description: str = "Wrap metadata"
 
-    def apply(self, input: Input, metadata: OuterMetadata) -> Output:
-        return self.subpipe.apply(input, self.to_inner(metadata))
+    def apply(self, data: Input, metadata: OuterMetadata) -> Output:
+        return self.subpipe.apply(data, self.to_inner(metadata))
 
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
@@ -256,8 +256,8 @@ class MapPipe[Input, Output, Metadata](Pipe[Sequence[Input], Sequence[Output], M
     subpipe: Pipe[Input, Output, Metadata]
     description: str = "Map"
 
-    def apply(self, input: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
-        return [self.subpipe.apply(i, metadata) for i in input]
+    def apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        return [self.subpipe.apply(i, metadata) for i in data]
 
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
@@ -274,8 +274,8 @@ class FilterPipe[Input, Metadata](Pipe[Sequence[Input], Sequence[Input], Metadat
     predicate: PipeOrCallable[Input, bool, Metadata]
     description: str = "Filter"
 
-    def apply(self, input: Sequence[Input], metadata: Metadata) -> Sequence[Input]:
-        return [i for i in input if _call_or_apply(self.predicate, i, metadata)]
+    def apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Input]:
+        return [i for i in data if _call_or_apply(self.predicate, i, metadata)]
 
     def get_subgraph(self) -> Optional[Graph]:
         return self.predicate.to_graph() if isinstance(self.predicate, Pipe) else None
@@ -294,11 +294,11 @@ class RetryPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
     exceptions: type | tuple[type, ...]
     description: str = "Retry several times"
 
-    def apply(self, input: Input, metadata: Metadata) -> Output:
+    def apply(self, data: Input, metadata: Metadata) -> Output:
         attempt = 0
         while True:
             try:
-                return self.subpipe.apply(input, metadata)
+                return self.subpipe.apply(data, metadata)
 
             except Exception as e:
                 if not isinstance(e, self.exceptions):

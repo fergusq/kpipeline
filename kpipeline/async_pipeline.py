@@ -39,12 +39,12 @@ async def _await_or_return[T](data: T | Awaitable[T]) -> T:
 type SyncOrAsyncPipeOrCallable[I, O, M] = Callable[[I, M], O] | Callable[[I, M], Awaitable[O]] | SyncOrAsyncPipe[I, O, M]
 
 
-async def _call_or_apply[I, O, M](f: SyncOrAsyncPipeOrCallable[I, O, M], i: I, m: M) -> O:
+async def _call_or_apply[I, O, M](f: SyncOrAsyncPipeOrCallable[I, O, M], d: I, m: M) -> O:
     if isinstance(f, BasePipe):
-        return await _await_or_return(f.apply(i, m))
+        return await _await_or_return(f.apply(d, m))
 
     else:
-        return await _await_or_return(f(i, m))
+        return await _await_or_return(f(d, m))
 
 
 @dataclass(frozen=True)
@@ -55,8 +55,8 @@ class AsyncChainPipe[Input, Middle, Output, Metadata](AsyncPipe[Input, Output, M
     pipe1: SyncOrAsyncPipe[Input, Middle, Metadata]
     pipe2: SyncOrAsyncPipe[Middle, Output, Metadata]
 
-    async def apply(self, input: Input, metadata: Metadata) -> Output:
-        middle = await _await_or_return(self.pipe1.apply(input, metadata))
+    async def apply(self, data: Input, metadata: Metadata) -> Output:
+        middle = await _await_or_return(self.pipe1.apply(data, metadata))
         return await _await_or_return(self.pipe2.apply(middle, metadata))
 
     def to_graph(self) -> Graph:
@@ -70,8 +70,8 @@ class AsyncIdentityPipe[InputOutput, Metadata](AsyncPipe[InputOutput, InputOutpu
     """
     A pipe that returns its input.
     """
-    async def apply(self, input: InputOutput, metadata: Metadata) -> InputOutput:
-        return input
+    async def apply(self, data: InputOutput, metadata: Metadata) -> InputOutput:
+        return data
 
 
 @dataclass(frozen=True)
@@ -84,12 +84,12 @@ class AsyncBranchPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata
     else_pipe: SyncOrAsyncPipe[Input, Output, Metadata]
     description: str = ""
 
-    async def apply(self, input: Input, metadata: Metadata) -> Output:
-        if await _call_or_apply(self.condition, input, metadata):
-            return await _await_or_return(self.then_pipe.apply(input, metadata))
+    async def apply(self, data: Input, metadata: Metadata) -> Output:
+        if await _call_or_apply(self.condition, data, metadata):
+            return await _await_or_return(self.then_pipe.apply(data, metadata))
 
         else:
-            return await _await_or_return(self.else_pipe.apply(input, metadata))
+            return await _await_or_return(self.else_pipe.apply(data, metadata))
 
     def to_graph(self) -> Graph:
         condition_node = self.to_node()._replace(title=self.description or "Condition", shape="condition", subgraph=self.condition.to_graph() if isinstance(self.condition, Pipe) else None)
@@ -117,12 +117,12 @@ class AsyncConditionalPipe[InputOutput, Metadata](AsyncPipe[InputOutput, InputOu
     subpipe: SyncOrAsyncPipe[InputOutput, InputOutput, Metadata]
     description: str = ""
 
-    async def apply(self, input: InputOutput, metadata: Metadata) -> InputOutput:
-        if await _await_or_return(self.condition(input, metadata)):
-            return await _await_or_return(self.subpipe.apply(input, metadata))
+    async def apply(self, data: InputOutput, metadata: Metadata) -> InputOutput:
+        if await _await_or_return(self.condition(data, metadata)):
+            return await _await_or_return(self.subpipe.apply(data, metadata))
 
         else:
-            return input
+            return data
 
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
@@ -144,13 +144,13 @@ class AsyncSelectPipe[Input, Output, Metadata, Key](AsyncPipe[Input, Output, Met
     otherwise_pipe: SyncOrAsyncPipe[Input, Output, Metadata]
     description: str = ""
 
-    async def apply(self, input: Input, metadata: Metadata) -> Output:
-        key = await _call_or_apply(self.key, input, metadata)
+    async def apply(self, data: Input, metadata: Metadata) -> Output:
+        key = await _call_or_apply(self.key, data, metadata)
         if key in self.subpipes:
-            return await _await_or_return(self.subpipes[key].apply(input, metadata))
+            return await _await_or_return(self.subpipes[key].apply(data, metadata))
 
         else:
-            return await _await_or_return(self.otherwise_pipe.apply(input, metadata))
+            return await _await_or_return(self.otherwise_pipe.apply(data, metadata))
 
     def to_graph(self) -> Graph:
         condition_node = self.to_node()._replace(title=self.description or "Condition", shape="condition", subgraph=self.key.to_graph() if isinstance(self.key, Pipe) else None)
@@ -176,10 +176,10 @@ class AsyncParallelPipe[Input, Output, CombinedOutput, Metadata](AsyncPipe[Input
     combine: SyncOrAsyncPipeOrCallable[Sequence[Output], CombinedOutput, Metadata]
     description: str = ""
 
-    async def apply(self, input: Input, metadata: Metadata) -> CombinedOutput:
+    async def apply(self, data: Input, metadata: Metadata) -> CombinedOutput:
         results = []
         for subpipe in self.subpipes:
-            results.append(_await_or_return(subpipe.apply(input, metadata)))
+            results.append(_await_or_return(subpipe.apply(data, metadata)))
 
         gathered: Sequence[Output] = await asyncio.gather(*results)
         return await _call_or_apply(self.combine, gathered, metadata)
@@ -206,8 +206,8 @@ class AsyncMetadataWrapperPipe[Input, Output, OuterMetadata, InnerMetadata](Asyn
     subpipe: SyncOrAsyncPipe[Input, Output, InnerMetadata]
     description: str = ""
 
-    async def apply(self, input: Input, metadata: OuterMetadata) -> Output:
-        return await _await_or_return(self.subpipe.apply(input, await _await_or_return(self.to_inner(metadata))))
+    async def apply(self, data: Input, metadata: OuterMetadata) -> Output:
+        return await _await_or_return(self.subpipe.apply(data, await _await_or_return(self.to_inner(metadata))))
 
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
@@ -229,8 +229,8 @@ class AsyncMapPipe[Input, Output, Metadata](AsyncPipe[Sequence[Input], Sequence[
     subpipe: SyncOrAsyncPipe[Input, Output, Metadata]
     description: str = "Map"
 
-    async def apply(self, input: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
-        return [await _await_or_return(self.subpipe.apply(i, metadata)) for i in input]
+    async def apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        return [await _await_or_return(self.subpipe.apply(i, metadata)) for i in data]
 
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
@@ -247,11 +247,11 @@ class AsyncFilterPipe[Input, Metadata](AsyncPipe[Sequence[Input], Sequence[Input
     predicate: SyncOrAsyncPipeOrCallable[Input, bool, Metadata]
     description: str = "Filter"
 
-    async def apply(self, input: Sequence[Input], metadata: Metadata) -> Sequence[Input]:
-        return [i for i in input if await _call_or_apply(self.predicate, i, metadata)]
+    async def apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Input]:
+        return [i for i in data if await _call_or_apply(self.predicate, i, metadata)]
 
     def get_subgraph(self) -> Optional[Graph]:
-        return self.predicate.to_graph() if isinstance(self.predicate, Pipe) else None
+        return self.predicate.to_graph() if isinstance(self.predicate, BasePipe) else None
 
     def to_node(self) -> GraphNode:
         return super().to_node()._replace(title=self.description)
@@ -267,11 +267,11 @@ class AsyncRetryPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata]
     exceptions: type | tuple[type, ...]
     description: str = "Retry several times"
 
-    async def apply(self, input: Input, metadata: Metadata) -> Output:
+    async def apply(self, data: Input, metadata: Metadata) -> Output:
         attempt = 0
         while True:
             try:
-                return await _await_or_return(self.subpipe.apply(input, metadata))
+                return await _await_or_return(self.subpipe.apply(data, metadata))
 
             except Exception as e:
                 if not isinstance(e, self.exceptions):
