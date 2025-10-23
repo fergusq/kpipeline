@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Callable, Iterable, NamedTuple, Optional
+from typing import Callable, Optional
 
 from .graph import Graph, GraphNode, GraphConnection
 from .pipeline import BasePipe, Pipe
@@ -11,6 +11,13 @@ class AsyncPipe[Input, Output, Metadata](BasePipe[Input, Awaitable[Output], Meta
     """
     Abstract base class of all asynchronous pipes.
     """
+
+    async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        """
+        Like batch_apply, but returns Awaitable[Sequence[Output]] instead of Sequence[Awaitable[Output]].
+        The default implementation uses asyncio.gather.
+        """
+        return await asyncio.gather(*self.batch_apply(data, metadata))
 
     def async_chain[OtherOutput](self, other: "Pipe[Output, OtherOutput, Metadata] | AsyncPipe[Output, OtherOutput, Metadata]") -> "AsyncChainPipe[Input, Output, OtherOutput, Metadata]":
         """
@@ -59,6 +66,19 @@ class AsyncChainPipe[Input, Middle, Output, Metadata](AsyncPipe[Input, Output, M
         middle = await _await_or_return(self.pipe1.apply(data, metadata))
         return await _await_or_return(self.pipe2.apply(middle, metadata))
 
+    async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        if isinstance(self.pipe1, AsyncPipe):
+            middle_batch = await self.pipe1.async_batch_apply(data, metadata)
+
+        else:
+            middle_batch = self.pipe1.batch_apply(data, metadata)
+
+        if isinstance(self.pipe2, AsyncPipe):
+            return await self.pipe2.async_batch_apply(middle_batch, metadata)
+
+        else:
+            return self.pipe2.batch_apply(middle_batch, metadata)
+
     def to_graph(self) -> Graph:
         graph1 = self.pipe1.to_graph()
         graph2 = self.pipe2.to_graph()
@@ -72,6 +92,93 @@ class AsyncIdentityPipe[InputOutput, Metadata](AsyncPipe[InputOutput, InputOutpu
     """
     async def apply(self, data: InputOutput, metadata: Metadata) -> InputOutput:
         return data
+
+
+@dataclass(frozen=True)
+class AsyncMerge2Pipe[Input, Output1, Output2, Output, Metadata](AsyncPipe[Input, Output, Metadata]):
+    """
+    Runs two pipes and merges their results.
+    """
+    pipe1: SyncOrAsyncPipe[Input, Output1, Metadata]
+    pipe2: SyncOrAsyncPipe[Input, Output2, Metadata]
+    merge: Callable[[Output1, Output2], Output]
+    description: str = "Combine results"
+
+    async def apply(self, data: Input, metadata: Metadata) -> Output:
+        output1 = await _await_or_return(self.pipe1.apply(data, metadata))
+        output2 = await _await_or_return(self.pipe2.apply(data, metadata))
+        return self.merge(output1, output2)
+
+    async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        if isinstance(self.pipe1, AsyncPipe):
+            batch1 = await self.pipe1.async_batch_apply(data, metadata)
+
+        else:
+            batch1 = self.pipe1.batch_apply(data, metadata)
+
+        if isinstance(self.pipe2, AsyncPipe):
+            batch2 = await self.pipe2.async_batch_apply(data, metadata)
+
+        else:
+            batch2 = self.pipe2.batch_apply(data, metadata)
+
+        assert len(data) == len(batch1) == len(batch2), "lengths do not match"
+        return await asyncio.gather(*[_await_or_return(self.merge(output1, output2)) for output1, output2 in zip(batch1, batch2)])
+
+    def to_graph(self) -> Graph:
+        graph1 = self.pipe1.to_graph()
+        graph2 = self.pipe2.to_graph()
+        combine_node = self.to_node()._replace(title=self.description, shape="combine")
+        graph = Graph(nodes=(combine_node,), inputs=(combine_node.id,), outputs=(combine_node.id,))
+        return (graph1 | graph2) >> graph
+
+
+@dataclass(frozen=True)
+class AsyncMerge3Pipe[Input, Output1, Output2, Output3, Output, Metadata](AsyncPipe[Input, Output, Metadata]):
+    """
+    Runs three pipes and merges their results.
+    """
+    pipe1: SyncOrAsyncPipe[Input, Output1, Metadata]
+    pipe2: SyncOrAsyncPipe[Input, Output2, Metadata]
+    pipe3: SyncOrAsyncPipe[Input, Output3, Metadata]
+    merge: Callable[[Output1, Output2, Output3], Output] | Callable[[Output1, Output2, Output3], Awaitable[Output]]
+    description: str = "Combine results"
+
+    async def apply(self, data: Input, metadata: Metadata) -> Output:
+        output1 = await _await_or_return(self.pipe1.apply(data, metadata))
+        output2 = await _await_or_return(self.pipe2.apply(data, metadata))
+        output3 = await _await_or_return(self.pipe3.apply(data, metadata))
+        return await _await_or_return(self.merge(output1, output2, output3))
+
+    async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        if isinstance(self.pipe1, AsyncPipe):
+            batch1 = await self.pipe1.async_batch_apply(data, metadata)
+
+        else:
+            batch1 = self.pipe1.batch_apply(data, metadata)
+
+        if isinstance(self.pipe2, AsyncPipe):
+            batch2 = await self.pipe2.async_batch_apply(data, metadata)
+
+        else:
+            batch2 = self.pipe2.batch_apply(data, metadata)
+
+        if isinstance(self.pipe3, AsyncPipe):
+            batch3 = await self.pipe3.async_batch_apply(data, metadata)
+
+        else:
+            batch3 = self.pipe3.batch_apply(data, metadata)
+
+        assert len(data) == len(batch1) == len(batch2) == len(batch3), "lengths do not match"
+        return await asyncio.gather(*[_await_or_return(self.merge(output1, output2, output3)) for output1, output2, output3 in zip(batch1, batch2, batch3)])
+
+    def to_graph(self) -> Graph:
+        graph1 = self.pipe1.to_graph()
+        graph2 = self.pipe2.to_graph()
+        graph3 = self.pipe3.to_graph()
+        combine_node = self.to_node()._replace(title=self.description, shape="combine")
+        graph = Graph(nodes=(combine_node,), inputs=(combine_node.id,), outputs=(combine_node.id,))
+        return (graph1 | graph2 | graph3) >> graph
 
 
 @dataclass(frozen=True)
@@ -230,7 +337,11 @@ class AsyncMapPipe[Input, Output, Metadata](AsyncPipe[Sequence[Input], Sequence[
     description: str = "Map"
 
     async def apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
-        return [await _await_or_return(self.subpipe.apply(i, metadata)) for i in data]
+        if isinstance(self.subpipe, AsyncPipe):
+            return await self.subpipe.async_batch_apply(data, metadata)
+
+        else:
+            return self.subpipe.batch_apply(data, metadata)
 
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()

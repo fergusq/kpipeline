@@ -18,6 +18,12 @@ class BasePipe[Input, Output, Metadata](ABC):
         """
         ...
 
+    def batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        """
+        Applies the pipe to multiple data points. By default merely calls apply in sequence.
+        """
+        return [self.apply(d, metadata) for d in data]
+
     def chain[OtherOutput](self, other: "Pipe[Output, OtherOutput, Metadata]") -> "ChainPipe[Input, Output, OtherOutput, Metadata]":
         """
         Apply the second pipe to the result of the first pipe. Same as ChainPipe(self, other).
@@ -63,11 +69,11 @@ class Pipe[Input, Output, Metadata](BasePipe[Input, Output, Metadata]):
         return self.chain(other)
 
 
-type PipeOrCallable[I, O, M] = Callable[[I, M], O] | Pipe[I, O, M]
+type PipeOrCallable[I, O, M] = Callable[[I, M], O] | BasePipe[I, O, M]
 
 
 def _call_or_apply[I, O, M](f: PipeOrCallable[I, O, M], d: I, m: M) -> O:
-    if isinstance(f, Pipe):
+    if isinstance(f, BasePipe):
         return f.apply(d, m)
 
     else:
@@ -85,6 +91,10 @@ class ChainPipe[Input, Middle, Output, Metadata](Pipe[Input, Output, Metadata]):
     def apply(self, data: Input, metadata: Metadata) -> Output:
         return self.pipe2.apply(self.pipe1.apply(data, metadata), metadata)
 
+    def batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        middle_batch = self.pipe1.batch_apply(data, metadata)
+        return self.pipe2.batch_apply(middle_batch, metadata)
+
     def to_graph(self) -> Graph:
         graph1 = self.pipe1.to_graph()
         graph2 = self.pipe2.to_graph()
@@ -101,13 +111,75 @@ class IdentityPipe[InputOutput, Metadata](Pipe[InputOutput, InputOutput, Metadat
 
 
 @dataclass(frozen=True)
+class Merge2Pipe[Input, Output1, Output2, Output, Metadata](Pipe[Input, Output, Metadata]):
+    """
+    Runs two pipes and merges their results.
+    """
+    pipe1: BasePipe[Input, Output1, Metadata]
+    pipe2: BasePipe[Input, Output2, Metadata]
+    merge: Callable[[Output1, Output2], Output]
+    description: str = "Combine results"
+
+    def apply(self, data: Input, metadata: Metadata) -> Output:
+        output1 = self.pipe1.apply(data, metadata)
+        output2 = self.pipe2.apply(data, metadata)
+        return self.merge(output1, output2)
+
+    def batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        batch1 = self.pipe1.batch_apply(data, metadata)
+        batch2 = self.pipe2.batch_apply(data, metadata)
+        assert len(data) == len(batch1) == len(batch2), "lengths do not match"
+        return [self.merge(output1, output2) for output1, output2 in zip(batch1, batch2)]
+
+    def to_graph(self) -> Graph:
+        graph1 = self.pipe1.to_graph()
+        graph2 = self.pipe2.to_graph()
+        combine_node = self.to_node()._replace(title=self.description, shape="combine")
+        graph = Graph(nodes=(combine_node,), inputs=(combine_node.id,), outputs=(combine_node.id,))
+        return (graph1 | graph2) >> graph
+
+
+@dataclass(frozen=True)
+class Merge3Pipe[Input, Output1, Output2, Output3, Output, Metadata](Pipe[Input, Output, Metadata]):
+    """
+    Runs three pipes and merges their results.
+    """
+    pipe1: BasePipe[Input, Output1, Metadata]
+    pipe2: BasePipe[Input, Output2, Metadata]
+    pipe3: BasePipe[Input, Output3, Metadata]
+    merge: Callable[[Output1, Output2, Output3], Output]
+    description: str = "Combine results"
+
+    def apply(self, data: Input, metadata: Metadata) -> Output:
+        output1 = self.pipe1.apply(data, metadata)
+        output2 = self.pipe2.apply(data, metadata)
+        output3 = self.pipe3.apply(data, metadata)
+        return self.merge(output1, output2, output3)
+
+    def batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        batch1 = self.pipe1.batch_apply(data, metadata)
+        batch2 = self.pipe2.batch_apply(data, metadata)
+        batch3 = self.pipe3.batch_apply(data, metadata)
+        assert len(data) == len(batch1) == len(batch2) == len(batch3), "lengths do not match"
+        return [self.merge(output1, output2, output3) for output1, output2, output3 in zip(batch1, batch2, batch3)]
+
+    def to_graph(self) -> Graph:
+        graph1 = self.pipe1.to_graph()
+        graph2 = self.pipe2.to_graph()
+        graph3 = self.pipe3.to_graph()
+        combine_node = self.to_node()._replace(title=self.description, shape="combine")
+        graph = Graph(nodes=(combine_node,), inputs=(combine_node.id,), outputs=(combine_node.id,))
+        return (graph1 | graph2 | graph3) >> graph
+
+
+@dataclass(frozen=True)
 class BranchPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
     """
     Selects one of two pipes to apply based on a condition.
     """
     condition: PipeOrCallable[Input, bool, Metadata]
-    then_pipe: Pipe[Input, Output, Metadata]
-    else_pipe: Pipe[Input, Output, Metadata]
+    then_pipe: BasePipe[Input, Output, Metadata]
+    else_pipe: BasePipe[Input, Output, Metadata]
     description: str = "Condition"
 
     def apply(self, data: Input, metadata: Metadata) -> Output:
@@ -140,7 +212,7 @@ class ConditionalPipe[InputOutput, Metadata](Pipe[InputOutput, InputOutput, Meta
     Can only be used when the subpipe returns the same type that gets in.
     """
     condition: Callable[[InputOutput, Metadata], bool]
-    subpipe: Pipe[InputOutput, InputOutput, Metadata]
+    subpipe: BasePipe[InputOutput, InputOutput, Metadata]
     description: str = "Condition"
 
     def apply(self, data: InputOutput, metadata: Metadata) -> InputOutput:
@@ -166,8 +238,8 @@ class SelectPipe[Input, Output, Metadata, Key](Pipe[Input, Output, Metadata]):
     Selects one of multiple pipes based on a selector function. BranchPipe generalized to more than two branches.
     """
     key: PipeOrCallable[Input, Key, Metadata]
-    subpipes: Mapping[Key, Pipe[Input, Output, Metadata]]
-    otherwise_pipe: Pipe[Input, Output, Metadata]
+    subpipes: Mapping[Key, BasePipe[Input, Output, Metadata]]
+    otherwise_pipe: BasePipe[Input, Output, Metadata]
     description: str = "Key"
 
     def apply(self, data: Input, metadata: Metadata) -> Output:
@@ -199,7 +271,7 @@ class ParallelPipe[Input, Output, CombinedOutput, Metadata](Pipe[Input, Combined
     Executes multiple pipes on the same input and combines the outputs.
     The synchronous implementation does not actually execute the pipes in parallel.
     """
-    subpipes: Sequence[Pipe[Input, Output, Metadata]]
+    subpipes: Sequence[BasePipe[Input, Output, Metadata]]
     combine: PipeOrCallable[Sequence[Output], CombinedOutput, Metadata]
     description: str = "Combine results"
 
@@ -230,7 +302,7 @@ class MetadataWrapperPipe[Input, Output, OuterMetadata, InnerMetadata](Pipe[Inpu
     Does NOT allow to_inner to be a pipe: this is intentional, metadata is not transformed by pipes.
     """
     to_inner: Callable[[OuterMetadata], InnerMetadata]
-    subpipe: Pipe[Input, Output, InnerMetadata]
+    subpipe: BasePipe[Input, Output, InnerMetadata]
     description: str = "Wrap metadata"
 
     def apply(self, data: Input, metadata: OuterMetadata) -> Output:
@@ -253,11 +325,11 @@ class MapPipe[Input, Output, Metadata](Pipe[Sequence[Input], Sequence[Output], M
 
     Does NOT allow the subpipe to be a callable: this is intentional, functions that transforms Inputs to Outputs should be pipes.
     """
-    subpipe: Pipe[Input, Output, Metadata]
+    subpipe: BasePipe[Input, Output, Metadata]
     description: str = "Map"
 
     def apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
-        return [self.subpipe.apply(i, metadata) for i in data]
+        return self.subpipe.batch_apply(data, metadata)
 
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
@@ -289,7 +361,7 @@ class RetryPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
     """
     Tries to execute the subpipe several times in case it fails.
     """
-    subpipe: Pipe[Input, Output, Metadata]
+    subpipe: BasePipe[Input, Output, Metadata]
     retries: int
     exceptions: type | tuple[type, ...]
     description: str = "Retry several times"

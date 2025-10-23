@@ -1,4 +1,4 @@
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Type
 
 type GraphNodeId = str
 
@@ -6,7 +6,7 @@ type GraphNodeId = str
 class GraphNode(NamedTuple):
     id: GraphNodeId
     title: str
-    type: Optional[type] = None
+    type: Optional[Type] = None
     shape: Optional[str] = None
     subgraph: "Optional[Graph]" = None
 
