@@ -340,7 +340,8 @@ class ParallelPipe[Input, Output, CombinedOutput, Metadata](Pipe[Input, Combined
         for subpipe in self.subpipes:
             results.append(subpipe.batch_apply(data, metadata))
 
-        return [_call_or_apply(self.combine, seq, metadata) for seq in zip(*results)]
+        zipped_results: zip[Sequence[Output]] = zip(*results)
+        return [_call_or_apply(self.combine, seq, metadata) for seq in zipped_results]
 
     def to_graph(self) -> Graph:
         combine_node = self.to_node()._replace(title=self.description, shape="combine", subgraph=self.combine.to_graph() if isinstance(self.combine, Pipe) else None)

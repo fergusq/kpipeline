@@ -327,7 +327,8 @@ class AsyncParallelPipe[Input, Output, CombinedOutput, Metadata](AsyncPipe[Input
             results.append(_batch_apply(subpipe, data, metadata))
 
         gathered = await asyncio.gather(*results)
-        return await asyncio.gather(*[_call_or_apply(self.combine, seq, metadata) for seq in zip(*gathered)])
+        zipped_results: zip[Sequence[Output]] = zip(*gathered)
+        return await asyncio.gather(*[_call_or_apply(self.combine, seq, metadata) for seq in zipped_results])
 
     def to_graph(self) -> Graph:
         combine_node = self.to_node()._replace(title=self.description or "Combine results", shape="combine", subgraph=self.combine.to_graph() if isinstance(self.combine, Pipe) else None)
