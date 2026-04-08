@@ -189,6 +189,25 @@ class BranchPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
         else:
             return self.else_pipe.apply(data, metadata)
 
+    def batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        conds = [_call_or_apply(self.condition, d, metadata) for d in data]
+        then_batch = self.then_pipe.batch_apply([d for c, d in zip(conds, data) if c], metadata)
+        else_batch = self.else_pipe.batch_apply([d for c, d in zip(conds, data) if not c], metadata)
+
+        ans: list[Output] = []
+        t = 0
+        e = 0
+        for cond in conds:
+            if cond:
+                ans.append(then_batch[t])
+                t += 1
+            
+            else:
+                ans.append(else_batch[e])
+                e += 1
+
+        return ans
+
     def to_graph(self) -> Graph:
         condition_node = self.to_node()._replace(title=self.description, shape="condition", subgraph=self.condition.to_graph() if isinstance(self.condition, Pipe) else None)
         then_graph = self.then_pipe.to_graph()
@@ -222,6 +241,22 @@ class ConditionalPipe[InputOutput, Metadata](Pipe[InputOutput, InputOutput, Meta
         else:
             return data
 
+    def batch_apply(self, data: Sequence[InputOutput], metadata: Metadata) -> Sequence[InputOutput]:
+        conds = [_call_or_apply(self.condition, d, metadata) for d in data]
+        then_batch = self.subpipe.batch_apply([d for c, d in zip(conds, data) if c], metadata)
+
+        ans: list[InputOutput] = []
+        t = 0
+        for i, cond in enumerate(conds):
+            if cond:
+                ans.append(then_batch[t])
+                t += 1
+            
+            else:
+                ans.append(data[i])
+
+        return ans
+
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
 
@@ -250,6 +285,23 @@ class SelectPipe[Input, Output, Metadata, Key](Pipe[Input, Output, Metadata]):
         else:
             return self.otherwise_pipe.apply(data, metadata)
 
+    def batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        keys = [_call_or_apply(self.key, d, metadata) for d in data]
+        unique_keys = list(set(keys))
+        batches: dict[Key, list[tuple[int, Input]]] = {key: [] for key in unique_keys}
+        for i, (key, item) in enumerate(zip(keys, data)):
+            batches[key].append((i, item))
+        
+        batch_results: list[Sequence[Output]] = []
+        for key in unique_keys:
+            pipe = self.subpipes.get(key, self.otherwise_pipe)
+            batch = [item for _, item in batches[key]]
+            batch_results.append(pipe.batch_apply(batch, metadata))
+
+        batch_results_dict = {key: batch_results[i] for i, key in enumerate(unique_keys)}
+        ans_dict = {i: result for key, batch in batches.items() for (i, _), result in zip(batch, batch_results_dict[key])}
+        return [ans_dict[i] for i in range(len(data))]
+
     def to_graph(self) -> Graph:
         condition_node = self.to_node()._replace(title=self.description, shape="condition", subgraph=self.key.to_graph() if isinstance(self.key, Pipe) else None)
         otherwise_graph = self.otherwise_pipe.to_graph()
@@ -276,12 +328,19 @@ class ParallelPipe[Input, Output, CombinedOutput, Metadata](Pipe[Input, Combined
     description: str = "Combine results"
 
     def apply(self, data: Input, metadata: Metadata) -> CombinedOutput:
-        results = []
+        results: list[Output] = []
         for subpipe in self.subpipes:
             results.append(subpipe.apply(data, metadata))
 
         seq: Sequence[Output] = results
         return _call_or_apply(self.combine, seq, metadata)
+
+    def batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[CombinedOutput]:
+        results: list[Sequence[Output]] = []
+        for subpipe in self.subpipes:
+            results.append(subpipe.batch_apply(data, metadata))
+
+        return [_call_or_apply(self.combine, seq, metadata) for seq in zip(*results)]
 
     def to_graph(self) -> Graph:
         combine_node = self.to_node()._replace(title=self.description, shape="combine", subgraph=self.combine.to_graph() if isinstance(self.combine, Pipe) else None)

@@ -54,6 +54,14 @@ async def _call_or_apply[I, O, M](f: SyncOrAsyncPipeOrCallable[I, O, M], d: I, m
         return await _await_or_return(f(d, m))
 
 
+async def _batch_apply[I, O, M](p: SyncOrAsyncPipe[I, O, M], d: Sequence[I], m: M) -> Sequence[O]:
+    if isinstance(p, AsyncPipe):
+        return await p.async_batch_apply(d, m)
+    
+    else:
+        return p.batch_apply(d, m)
+
+
 @dataclass(frozen=True)
 class AsyncChainPipe[Input, Middle, Output, Metadata](AsyncPipe[Input, Output, Metadata]):
     """
@@ -67,17 +75,8 @@ class AsyncChainPipe[Input, Middle, Output, Metadata](AsyncPipe[Input, Output, M
         return await _await_or_return(self.pipe2.apply(middle, metadata))
 
     async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
-        if isinstance(self.pipe1, AsyncPipe):
-            middle_batch = await self.pipe1.async_batch_apply(data, metadata)
-
-        else:
-            middle_batch = self.pipe1.batch_apply(data, metadata)
-
-        if isinstance(self.pipe2, AsyncPipe):
-            return await self.pipe2.async_batch_apply(middle_batch, metadata)
-
-        else:
-            return self.pipe2.batch_apply(middle_batch, metadata)
+        middle_batch = await _batch_apply(self.pipe1, data, metadata)
+        return await _batch_apply(self.pipe2, middle_batch, metadata)
 
     def to_graph(self) -> Graph:
         graph1 = self.pipe1.to_graph()
@@ -110,17 +109,8 @@ class AsyncMerge2Pipe[Input, Output1, Output2, Output, Metadata](AsyncPipe[Input
         return self.merge(output1, output2)
 
     async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
-        if isinstance(self.pipe1, AsyncPipe):
-            batch1 = await self.pipe1.async_batch_apply(data, metadata)
-
-        else:
-            batch1 = self.pipe1.batch_apply(data, metadata)
-
-        if isinstance(self.pipe2, AsyncPipe):
-            batch2 = await self.pipe2.async_batch_apply(data, metadata)
-
-        else:
-            batch2 = self.pipe2.batch_apply(data, metadata)
+        batch1 = await _batch_apply(self.pipe1, data, metadata)
+        batch2 = await _batch_apply(self.pipe2, data, metadata)
 
         assert len(data) == len(batch1) == len(batch2), "lengths do not match"
         return await asyncio.gather(*[_await_or_return(self.merge(output1, output2)) for output1, output2 in zip(batch1, batch2)])
@@ -151,23 +141,9 @@ class AsyncMerge3Pipe[Input, Output1, Output2, Output3, Output, Metadata](AsyncP
         return await _await_or_return(self.merge(output1, output2, output3))
 
     async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
-        if isinstance(self.pipe1, AsyncPipe):
-            batch1 = await self.pipe1.async_batch_apply(data, metadata)
-
-        else:
-            batch1 = self.pipe1.batch_apply(data, metadata)
-
-        if isinstance(self.pipe2, AsyncPipe):
-            batch2 = await self.pipe2.async_batch_apply(data, metadata)
-
-        else:
-            batch2 = self.pipe2.batch_apply(data, metadata)
-
-        if isinstance(self.pipe3, AsyncPipe):
-            batch3 = await self.pipe3.async_batch_apply(data, metadata)
-
-        else:
-            batch3 = self.pipe3.batch_apply(data, metadata)
+        batch1 = await _batch_apply(self.pipe1, data, metadata)
+        batch2 = await _batch_apply(self.pipe2, data, metadata)
+        batch3 = await _batch_apply(self.pipe3, data, metadata)
 
         assert len(data) == len(batch1) == len(batch2) == len(batch3), "lengths do not match"
         return await asyncio.gather(*[_await_or_return(self.merge(output1, output2, output3)) for output1, output2, output3 in zip(batch1, batch2, batch3)])
@@ -197,6 +173,26 @@ class AsyncBranchPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata
 
         else:
             return await _await_or_return(self.else_pipe.apply(data, metadata))
+
+    async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        conds = await asyncio.gather(*[_call_or_apply(self.condition, d, metadata) for d in data])
+        then_batch_future = _batch_apply(self.then_pipe, [d for c, d in zip(conds, data) if c], metadata)
+        else_batch_future = _batch_apply(self.else_pipe, [d for c, d in zip(conds, data) if not c], metadata)
+        then_batch, else_batch = await asyncio.gather(then_batch_future, else_batch_future)
+
+        ans: list[Output] = []
+        t = 0
+        e = 0
+        for cond in conds:
+            if cond:
+                ans.append(then_batch[t])
+                t += 1
+            
+            else:
+                ans.append(else_batch[e])
+                e += 1
+
+        return ans
 
     def to_graph(self) -> Graph:
         condition_node = self.to_node()._replace(title=self.description or "Condition", shape="condition", subgraph=self.condition.to_graph() if isinstance(self.condition, Pipe) else None)
@@ -231,6 +227,22 @@ class AsyncConditionalPipe[InputOutput, Metadata](AsyncPipe[InputOutput, InputOu
         else:
             return data
 
+    async def async_batch_apply(self, data: Sequence[InputOutput], metadata: Metadata) -> Sequence[InputOutput]:
+        conds = await asyncio.gather(*[_call_or_apply(self.condition, d, metadata) for d in data])
+        then_batch = await _batch_apply(self.subpipe, [d for c, d in zip(conds, data) if c], metadata)
+
+        ans: list[InputOutput] = []
+        t = 0
+        for i, cond in enumerate(conds):
+            if cond:
+                ans.append(then_batch[t])
+                t += 1
+            
+            else:
+                ans.append(data[i])
+
+        return ans
+
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
 
@@ -259,6 +271,24 @@ class AsyncSelectPipe[Input, Output, Metadata, Key](AsyncPipe[Input, Output, Met
         else:
             return await _await_or_return(self.otherwise_pipe.apply(data, metadata))
 
+    async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        keys = await asyncio.gather(*[_call_or_apply(self.key, d, metadata) for d in data])
+        unique_keys = list(set(keys))
+        batches: dict[Key, list[tuple[int, Input]]] = {key: [] for key in unique_keys}
+        for i, (key, item) in enumerate(zip(keys, data)):
+            batches[key].append((i, item))
+        
+        batch_futures: list[Awaitable[Sequence[Output]]] = []
+        for key in unique_keys:
+            pipe = self.subpipes.get(key, self.otherwise_pipe)
+            batch = [item for _, item in batches[key]]
+            batch_futures.append(_batch_apply(pipe, batch, metadata))
+
+        batch_results = await asyncio.gather(*batch_futures)
+        batch_results_dict = {key: batch_results[i] for i, key in enumerate(unique_keys)}
+        ans_dict = {i: result for key, batch in batches.items() for (i, _), result in zip(batch, batch_results_dict[key])}
+        return [ans_dict[i] for i in range(len(data))]
+
     def to_graph(self) -> Graph:
         condition_node = self.to_node()._replace(title=self.description or "Condition", shape="condition", subgraph=self.key.to_graph() if isinstance(self.key, Pipe) else None)
         otherwise_graph = self.otherwise_pipe.to_graph()
@@ -284,12 +314,20 @@ class AsyncParallelPipe[Input, Output, CombinedOutput, Metadata](AsyncPipe[Input
     description: str = ""
 
     async def apply(self, data: Input, metadata: Metadata) -> CombinedOutput:
-        results = []
+        results: list[Awaitable[Output]] = []
         for subpipe in self.subpipes:
             results.append(_await_or_return(subpipe.apply(data, metadata)))
 
         gathered: Sequence[Output] = await asyncio.gather(*results)
         return await _call_or_apply(self.combine, gathered, metadata)
+
+    async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[CombinedOutput]:
+        results: list[Awaitable[Sequence[Output]]] = []
+        for subpipe in self.subpipes:
+            results.append(_batch_apply(subpipe, data, metadata))
+
+        gathered = await asyncio.gather(*results)
+        return await asyncio.gather(*[_call_or_apply(self.combine, seq, metadata) for seq in zip(*gathered)])
 
     def to_graph(self) -> Graph:
         combine_node = self.to_node()._replace(title=self.description or "Combine results", shape="combine", subgraph=self.combine.to_graph() if isinstance(self.combine, Pipe) else None)
