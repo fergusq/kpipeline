@@ -17,11 +17,31 @@ class GraphNode(NamedTuple):
     shape: GraphNodeShape = "default"
     subgraph: "Optional[Graph]" = None
 
+    def to_dot(self, indent: int = 0) -> str:
+        shape_map = {
+            "default": "box",
+            "combine": "ellipse",
+            "condition": "diamond",
+        }
+        dot_shape = shape_map.get(self.shape, "box")
+        node_def = f"""{"  "*indent}"{self.id}" [label="{self.title}", shape={dot_shape}];"""
+        if self.subgraph:
+            sub_dot = self.subgraph.to_dot(name=None, indent=indent+1)
+            node_def += f"""{"  "*indent}subgraph "cluster_{self.id}" {{"""
+            node_def += f"""{"  "*indent}  label="{self.title}";"""
+            node_def += sub_dot
+            node_def += "  "*indent + "}"
+        return node_def
+
 
 class GraphConnection(NamedTuple):
     from_node: GraphNodeId
     to_node: GraphNodeId
     label: str = ""
+
+    def to_dot(self, indent: int = 0) -> str:
+        label_part = f' [label="{self.label}"]' if self.label else ""
+        return f"""{"  "*indent}"{self.from_node}" -> "{self.to_node}"{label_part};"""
 
 
 class Graph(NamedTuple):
@@ -71,3 +91,19 @@ class Graph(NamedTuple):
         references |= set(self.inputs)
         references |= set(self.outputs)
         return references <= node_id_set
+
+    def to_dot(self, name: str | None = "graph", indent: int = 0) -> str:
+        lines: list[str] = []
+        if name is not None:
+            lines.append(f"digraph {name} {{")
+
+        for node in self.nodes:
+            lines.append(node.to_dot(indent=indent+1))
+
+        for conn in self.connections:
+            lines.append(conn.to_dot(indent=indent+1))
+
+        if name is not None:
+            lines.append("}")
+
+        return "\n".join(lines)
