@@ -1,13 +1,20 @@
-from typing import NamedTuple, Optional, Type
+from typing import Literal, NamedTuple, Optional, Type
 
 type GraphNodeId = str
+type GraphNodeShape = Literal["default", "combine", "condition"]
+"""
+The shape of the node.
+`combine` is used for nodes that combine multiple inputs into one output.
+`condition` is used for nodes that diverge path based on condition.
+The actual shape depends on the rendering backend.
+"""
 
 
 class GraphNode(NamedTuple):
     id: GraphNodeId
     title: str
     type: Optional[Type] = None
-    shape: Optional[str] = None
+    shape: GraphNodeShape = "default"
     subgraph: "Optional[Graph]" = None
 
 
