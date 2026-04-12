@@ -24,13 +24,15 @@ class GraphNode(NamedTuple):
             "condition": "diamond",
         }
         dot_shape = shape_map.get(self.shape, "box")
-        node_def = f"""{"  "*indent}"{self.id}" [label="{self.title}", shape={dot_shape}];"""
         if self.subgraph:
             sub_dot = self.subgraph.to_dot(name=None, indent=indent+1)
+            node_def = ""
             node_def += f"""{"  "*indent}subgraph "cluster_{self.id}" {{"""
             node_def += f"""{"  "*indent}  label="{self.title}";"""
             node_def += sub_dot
             node_def += "  "*indent + "}"
+        else:
+            node_def = f"""{"  "*indent}"{self.id}" [label="{self.title}", shape={dot_shape}];"""
         return node_def
 
 
