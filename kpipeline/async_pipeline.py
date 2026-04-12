@@ -382,6 +382,20 @@ class AsyncMapPipe[Input, Output, Metadata](AsyncPipe[Sequence[Input], Sequence[
         else:
             return self.subpipe.batch_apply(data, metadata)
 
+    async def async_batch_apply(self, data: Sequence[Sequence[Input]], metadata: Metadata) -> Sequence[Sequence[Output]]:
+        combined_batch: list[Input] = []
+        for batch in data:
+            combined_batch += batch
+
+        combined_results = await _batch_apply(self.subpipe, combined_batch, metadata)
+        separated_results: list[Sequence[Output]] = []
+        i = 0
+        for batch in data:
+            separated_results.append(combined_results[i:i+len(batch)])
+            i += len(batch)
+
+        return separated_results
+
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
 

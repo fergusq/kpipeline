@@ -391,6 +391,20 @@ class MapPipe[Input, Output, Metadata](Pipe[Sequence[Input], Sequence[Output], M
     def apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
         return self.subpipe.batch_apply(data, metadata)
 
+    def batch_apply(self, data: Sequence[Sequence[Input]], metadata: Metadata) -> Sequence[Sequence[Output]]:
+        combined_batch: list[Input] = []
+        for batch in data:
+            combined_batch += batch
+
+        combined_results = self.subpipe.batch_apply(combined_batch, metadata)
+        separated_results: list[Sequence[Output]] = []
+        i = 0
+        for batch in data:
+            separated_results.append(combined_results[i:i+len(batch)])
+            i += len(batch)
+
+        return separated_results
+
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
 
