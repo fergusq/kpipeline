@@ -39,10 +39,6 @@ class GraphConnection(NamedTuple):
     to_node: GraphNodeId
     label: str = ""
 
-    def to_dot(self, indent: int = 0) -> str:
-        label_part = f' [label="{self.label}"]' if self.label else ""
-        return f"""{"  "*indent}"{self.from_node}" -> "{self.to_node}"{label_part};"""
-
 
 class Graph(NamedTuple):
     nodes: tuple[GraphNode, ...] = ()
@@ -92,7 +88,12 @@ class Graph(NamedTuple):
         references |= set(self.outputs)
         return references <= node_id_set
 
-    def to_dot(self, name: str | None = "graph", indent: int = 0) -> str:
+    def get_node(self, id: GraphNodeId) -> GraphNode | None:
+        for node in self.nodes:
+            if node.id == id:
+                return node
+
+    def to_dot(self, name: str | None = "g", indent: int = 0) -> str:
         lines: list[str] = []
         if name is not None:
             lines.append(f"digraph {name} {{")
@@ -101,7 +102,22 @@ class Graph(NamedTuple):
             lines.append(node.to_dot(indent=indent+1))
 
         for conn in self.connections:
-            lines.append(conn.to_dot(indent=indent+1))
+            from_node_obj = self.get_node(conn.from_node)
+            if from_node_obj is not None and from_node_obj.subgraph is not None:
+                from_nodes = from_node_obj.subgraph.outputs
+            else:
+                from_nodes = [conn.from_node]
+            to_node_obj = self.get_node(conn.to_node)
+
+            if to_node_obj is not None and to_node_obj.subgraph is not None:
+                to_nodes = to_node_obj.subgraph.inputs
+            else:
+                to_nodes = [conn.to_node]
+
+            for from_node in from_nodes:
+                for to_node in to_nodes:
+                    label_part = f' [label="{conn.label}"]' if conn.label else ""
+                    lines.append(f"""{"  "*indent}"{from_node}" -> "{to_node}"{label_part};""")
 
         if name is not None:
             lines.append("}")

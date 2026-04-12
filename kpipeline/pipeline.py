@@ -31,7 +31,7 @@ class BasePipe[Input, Output, Metadata](ABC):
         return ChainPipe(self, other)
 
     def to_node(self) -> GraphNode:
-        return GraphNode(id=str(id(self)), type=type(self), title="Pipe")
+        return GraphNode(id=str(id(self)), type=type(self), title=type(self).__name__)
 
     def get_subgraph(self) -> Optional[Graph]:
         return None
