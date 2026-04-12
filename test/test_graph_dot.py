@@ -8,7 +8,7 @@ def test_simple_graph_dot():
     graph = Graph(nodes=(node1, node2), connections=(conn,))
     
     dot = graph.to_dot()
-    assert 'digraph graph {' in dot
+    assert 'digraph g {' in dot
     assert '"n1" [label="Node 1", shape=box];' in dot
     assert '"n2" [label="Node 2", shape=box];' in dot
     assert '"n1" -> "n2" [label="connect"];' in dot
