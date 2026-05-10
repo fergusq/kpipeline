@@ -95,6 +95,8 @@ class Graph(NamedTuple):
             if node.id == id:
                 return node
 
+        return None
+
     def to_dot(self, name: str | None = "g", indent: int = 0) -> str:
         lines: list[str] = []
         if name is not None:
@@ -108,13 +110,13 @@ class Graph(NamedTuple):
             if from_node_obj is not None and from_node_obj.subgraph is not None:
                 from_nodes = from_node_obj.subgraph.outputs
             else:
-                from_nodes = [conn.from_node]
+                from_nodes = (conn.from_node,)
             to_node_obj = self.get_node(conn.to_node)
 
             if to_node_obj is not None and to_node_obj.subgraph is not None:
                 to_nodes = to_node_obj.subgraph.inputs
             else:
-                to_nodes = [conn.to_node]
+                to_nodes = (conn.to_node,)
 
             for from_node in from_nodes:
                 for to_node in to_nodes:
