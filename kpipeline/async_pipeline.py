@@ -1,7 +1,7 @@
 import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Hashable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .graph import Graph, GraphNode, GraphConnection
@@ -105,13 +105,17 @@ class AsyncMerge2Pipe[Input, Output1, Output2, Output, Metadata](AsyncPipe[Input
     description: str = "Combine results"
 
     async def apply(self, data: Input, metadata: Metadata) -> Output:
-        output1 = await _await_or_return(self.pipe1.apply(data, metadata))
-        output2 = await _await_or_return(self.pipe2.apply(data, metadata))
+        output1, output2 = await asyncio.gather(
+            _await_or_return(self.pipe1.apply(data, metadata)),
+            _await_or_return(self.pipe2.apply(data, metadata)),
+        )
         return self.merge(output1, output2)
 
     async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
-        batch1 = await _batch_apply(self.pipe1, data, metadata)
-        batch2 = await _batch_apply(self.pipe2, data, metadata)
+        batch1, batch2 = await asyncio.gather(
+            _batch_apply(self.pipe1, data, metadata),
+            _batch_apply(self.pipe2, data, metadata),
+        )
 
         assert len(data) == len(batch1) == len(batch2), "lengths do not match"
         return await asyncio.gather(*[_await_or_return(self.merge(output1, output2)) for output1, output2 in zip(batch1, batch2)])
@@ -136,15 +140,19 @@ class AsyncMerge3Pipe[Input, Output1, Output2, Output3, Output, Metadata](AsyncP
     description: str = "Combine results"
 
     async def apply(self, data: Input, metadata: Metadata) -> Output:
-        output1 = await _await_or_return(self.pipe1.apply(data, metadata))
-        output2 = await _await_or_return(self.pipe2.apply(data, metadata))
-        output3 = await _await_or_return(self.pipe3.apply(data, metadata))
+        output1, output2, output3 = await asyncio.gather(
+            _await_or_return(self.pipe1.apply(data, metadata)),
+            _await_or_return(self.pipe2.apply(data, metadata)),
+            _await_or_return(self.pipe3.apply(data, metadata)),
+        )
         return await _await_or_return(self.merge(output1, output2, output3))
 
     async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
-        batch1 = await _batch_apply(self.pipe1, data, metadata)
-        batch2 = await _batch_apply(self.pipe2, data, metadata)
-        batch3 = await _batch_apply(self.pipe3, data, metadata)
+        batch1, batch2, batch3 = await asyncio.gather(
+            _batch_apply(self.pipe1, data, metadata),
+            _batch_apply(self.pipe2, data, metadata),
+            _batch_apply(self.pipe3, data, metadata),
+        )
 
         assert len(data) == len(batch1) == len(batch2) == len(batch3), "lengths do not match"
         return await asyncio.gather(*[_await_or_return(self.merge(output1, output2, output3)) for output1, output2, output3 in zip(batch1, batch2, batch3)])
@@ -456,83 +464,311 @@ class AsyncRetryPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata]
         return True
 
 
-async def _callcc[T](f: Callable[[Callable[[T], None]], None]) -> T:
+@dataclass(frozen=True)
+class AsyncFallbackPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata]):
     """
-    Emulates how JavaScript's Promise callback works.
-    Not really like Lisp's call/cc since you cannot call the continuation multiple times.
-    """
-    future = asyncio.get_event_loop().create_future()
+    Tries to execute the subpipe and on failure executes a fallback pipe instead.
 
-    def continuation(value: T) -> None:
-        if not future.done():
-            future.set_result(value)
-
-    if asyncio.iscoroutinefunction(f):
-        await f(continuation)
-    else:
-        f(continuation)
-
-    return await future
-
-
-class AsyncBatchCollectorPipe[Input, Output, Metadata: Hashable](AsyncPipe[Input, Output, Metadata]):
-    """
-    Forms a batch from multiple inputs it receives in short time and
-    processes it using the batch apply of its subpipe.
-
-    This is a **stateful** pipe unlike most other pipes.
+    The batch_apply method of this class is configurable.
+    If batching is enabled (enable_batching is True), the subpipe's async_batch_apply is called.
+    In this case, the failure of a single item means the failure of the whole batch.
+    If batching is not enabled, each item in the batch is executed separately and
+    the failure of a single one does not mean the failure of the entire batch.
     """
     subpipe: SyncOrAsyncPipe[Input, Output, Metadata]
-    time: float
-    description: str
-
-    _accumulated_batch: list[tuple[Input, Metadata, Callable[[Output], None]]]
-    _lock: asyncio.Lock
-    _timer_task: asyncio.Task
-
-    def __init__(
-        self,
-        subpipe: SyncOrAsyncPipe[Input, Output, Metadata],
-        time: float,
-        description: str = "Accumulate batches of inputs",
-    ):
-        self.subpipe = subpipe
-        self.time = time
-        self._accumulated_batch = []
-        self._lock = asyncio.Lock()
-        self._timer_task = asyncio.create_task(self._timer())
+    fallback: SyncOrAsyncPipe[Input, Output, Metadata]
+    exceptions: type | tuple[type, ...] = Exception
+    enable_batching: bool = False
+    description: str = "AsyncFallbackPipe"
 
     async def apply(self, data: Input, metadata: Metadata) -> Output:
-        async with self._lock:
-            def add_task(continuation: Callable[[Output], None]):
-                self._accumulated_batch.append((data, metadata, continuation))
+        try:
+            return await _await_or_return(self.subpipe.apply(data, metadata))
+        except Exception as e:
+            if isinstance(e, self.exceptions):
+                return await _await_or_return(self.fallback.apply(data, metadata))
 
-            task = _callcc(add_task)
+            else:
+                raise e
 
-        return await task
+    async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        if self.enable_batching:
+            try:
+                return await _batch_apply(self.subpipe, data, metadata)
+            except Exception as e:
+                if isinstance(e, self.exceptions):
+                    return await _batch_apply(self.fallback, data, metadata)
 
-    async def _timer(self) -> None:
-        await asyncio.sleep(self.time)
-        async with self._lock:
-            grouped_by_metadata: defaultdict[Metadata, list[tuple[Input, Callable[[Output], None]]]] = defaultdict(list)
-            for data, metadata, continuation in self._accumulated_batch:
-                grouped_by_metadata[metadata].append((data, continuation))
+                else:
+                    raise e
 
-            for metadata, values in grouped_by_metadata.items():
-                batch = [data for data, _ in values]
-                results = await _batch_apply(self.subpipe, batch, metadata)
-                for result, (_, continuation) in zip(results, values):
-                    continuation(result)
-
-            self._accumulated_batch = []
-
-        self._timer_task = asyncio.create_task(self._timer())
+        else:
+            # AsyncPipe.batch_apply() implementation just calls apply multiple times in sequence
+            return await super().async_batch_apply(data, metadata)
 
     def get_subgraph(self) -> Optional[Graph]:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
-        return super().to_node()._replace(title=self.description)
+        return super().to_node()._replace(title=f"{self.description} (enable_batching={self.enable_batching})")
+
+    def is_wrapper(self) -> bool:
+        return True
+
+    def to_graph(self) -> Graph:
+        graph = super().to_graph()
+        graph_node = graph.nodes[0]  # Pipe.to_graph() only adds one node (with a subgraph)
+        fallback_graph = self.fallback.to_graph()
+        return (
+            # This joins the graphs so that the inputs and outputs of both are
+            # the inputs and outputs of the new graph
+            (graph | fallback_graph)
+
+            # Add a connection between the node containing the subpipe as a subgraph and the fallback graph
+            .add(connections=tuple(
+                GraphConnection(graph_node.id, fallback_input, label="On failure")
+                for fallback_input in fallback_graph.inputs
+            ))
+
+            # Set the inputs to be the inputs of graph, so that fallback's inputs are
+            # not inputs of the resulting graph
+            ._replace(
+                inputs=graph.inputs,
+            )
+        )
+
+
+@dataclass
+class AsyncBatchCollectorPipe[Input, Output, Metadata: Hashable](AsyncPipe[Input, Output, Metadata]):
+    """
+    Forms a batch from multiple inputs it receives within a time window and
+    processes them together using the batch_apply of its subpipe.
+
+    This is a **stateful** pipe unlike most other pipes.
+
+    Usage:
+        pipe = AsyncBatchCollectorPipe(subpipe=my_llm_pipe, time=0.05)
+        # Multiple concurrent calls to pipe.apply() will be batched together
+        # if they arrive within the time window.
+
+    Lifecycle:
+        Call `close()` when done to cancel the internal timer and process
+        any remaining items. Can also be used as an async context manager.
+    """
+
+    subpipe: SyncOrAsyncPipe[Input, Output, Metadata]
+    time: float
+    max_batch_size: int | None = None
+    description: str= "Accumulate batches of inputs"
+
+    _accumulated_batch: list[tuple[Input, Metadata, asyncio.Future[Output]]] = field(init=False, default_factory=list)
+    _lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
+    _timer_task: asyncio.Task | None = field(init=False, default=None)
+    _closed: bool = field(init=False, default=False)
+
+    async def __aenter__(self) -> "AsyncBatchCollectorPipe[Input, Output, Metadata]":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        """Cancel the timer and flush any remaining accumulated items."""
+        self._closed = True
+        if self._timer_task is not None and not self._timer_task.done():
+            self._timer_task.cancel()
+            try:
+                await self._timer_task
+            except asyncio.CancelledError:
+                pass
+
+        await self._flush()
+
+    async def apply(self, data: Input, metadata: Metadata) -> Output:
+        if self._closed:
+            raise RuntimeError("AsyncBatchCollectorPipe is closed")
+
+        future: asyncio.Future[Output] = asyncio.get_running_loop().create_future()
+
+        async with self._lock:
+            self._accumulated_batch.append((data, metadata, future))
+            batch_len = len(self._accumulated_batch)
+
+            # Start the timer on the first item in a new batch
+            if self._timer_task is None or self._timer_task.done():
+                self._timer_task = asyncio.create_task(self._timer())
+
+        # If we've hit the max batch size, flush immediately
+        if self.max_batch_size is not None and batch_len >= self.max_batch_size:
+            await self._flush()
+
+        # Wait for the result
+        return await future
+
+    async def _timer(self) -> None:
+        """Wait for the configured time window, then flush the batch."""
+        try:
+            await asyncio.sleep(self.time)
+        except asyncio.CancelledError:
+            return
+
+        await self._flush()
+
+    async def _flush(self) -> None:
+        """Process all accumulated items."""
+        async with self._lock:
+            if not self._accumulated_batch:
+                return
+
+            # Grab the current batch and reset
+            batch = self._accumulated_batch
+            self._accumulated_batch = []
+
+        # Group by metadata since batch_apply requires uniform metadata
+        grouped_by_metadata: defaultdict[
+            Metadata, list[tuple[Input, asyncio.Future[Output]]]
+        ] = defaultdict(list)
+
+        for data, metadata, future in batch:
+            grouped_by_metadata[metadata].append((data, future))
+
+        # Process each metadata group
+        for metadata, items in grouped_by_metadata.items():
+            inputs = [data for data, _ in items]
+            futures = [future for _, future in items]
+
+            try:
+                results = await _batch_apply(self.subpipe, inputs, metadata)
+
+                for future, result in zip(futures, results):
+                    if not future.done():
+                        future.set_result(result)
+
+            except Exception as e:
+                # If batch processing fails, propagate the error to all waiters
+                for future in futures:
+                    if not future.done():
+                        future.set_exception(e)
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=f"{self.description} (time={self.time})")
+
+    def is_wrapper(self) -> bool:
+        return True
+
+
+@dataclass
+class AsyncSemaphorePipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata]):
+    """
+    Limits the number of concurrent requests using a semaphore.
+    Does not allow synchronous subpipes.
+
+    The async_batch_apply of this class will split the incoming batch so
+    that it fits to the limit if necessary.
+
+    This is a **stateful** pipe unlike most other pipes.
+    """
+    subpipe: AsyncPipe[Input, Output, Metadata]
+    max_concurrent: int
+    description: str = "Limit number of concurrent inputs"
+
+    _semaphore: asyncio.Semaphore = field(init=False)
+    _lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
+
+    def __post_init__(self):
+        self._semaphore = asyncio.Semaphore(self.max_concurrent)
+
+    async def apply(self, data: Input, metadata: Metadata) -> Output:
+        async with self._semaphore:
+            return await self.subpipe.apply(data, metadata)
+
+    async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        # If the data fits, process it normally
+        if len(data) <= self.max_concurrent:
+            async with self._lock:
+                for _ in range(len(data)):
+                    await self._semaphore.acquire()
+
+            try:
+                results = await self.subpipe.async_batch_apply(data, metadata)
+                error = None
+            except Exception as e:
+                # We must release the lock even in case of failure, so error is not raised here
+                error = e
+                results = None
+
+            # Lock is not required for releasing the semaphore
+            for _ in range(len(data)):
+                self._semaphore.release()
+
+            if error is not None:
+                raise error
+            else:
+                assert results is not None
+                return results
+
+        else:
+            # If the data does not fit, split it to chunks of size max_concurrent
+            chunk_results: list[Sequence[Output]] = []
+            for i in range(0, len(data), self.max_concurrent):
+                chunk = data[i:i+self.max_concurrent]
+                chunk_results.append(await self.async_batch_apply(chunk, metadata))
+                # There is no asyncio.gather here since the chunks wouldn't fit simultaneously anyway
+
+            combined_results: list[Output] = []
+            for chunk_result in chunk_results:
+                combined_results += chunk_result
+
+            return combined_results
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=f"{self.description} (max_concurrent={self.max_concurrent})")
+
+    def is_wrapper(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class AsyncTimeoutPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata]):
+    """
+    Cancels the subpipe after a given amount of time (in seconds).
+    Does not allow synchronous subpipes.
+
+    The batch_apply method of this class is configurable.
+    If batching is enabled (enable_batching is True), the subpipe's async_batch_apply is called.
+    In this case, the timeout will cancel the whole batch.
+    If batching is not enabled, each item in the batch is executed separately and
+    have its own timeout.
+    """
+    subpipe: AsyncPipe[Input, Output, Metadata]
+    timeout: float
+    enable_batching: bool = False
+    description: str = "Cancel after timeout"
+
+    async def apply(self, data: Input, metadata: Metadata) -> Output:
+        async with asyncio.timeout(self.timeout):
+            return await self.subpipe.apply(data, metadata)
+
+    async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        if self.enable_batching:
+            async with asyncio.timeout(self.timeout):
+                return await self.subpipe.async_batch_apply(data, metadata)
+
+        else:
+            # AsyncPipe.batch_apply() implementation just calls apply multiple times in sequence
+            return await super().async_batch_apply(data, metadata)
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=f"{self.description} (timeout={self.timeout}, enable_batching={self.enable_batching})")
 
     def is_wrapper(self) -> bool:
         return True

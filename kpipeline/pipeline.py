@@ -463,3 +463,77 @@ class RetryPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
     def is_wrapper(self) -> bool:
         return True
 
+
+@dataclass(frozen=True)
+class FallbackPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
+    """
+    Tries to execute the subpipe and on failure executes a fallback pipe instead.
+
+    The batch_apply method of this class is configurable.
+    If batching is enabled (enable_batching is True), the subpipe's batch_apply is called.
+    In this case, the failure of a single item means the failure of the whole batch.
+    If batching is not enabled, each item in the batch is executed separately and
+    the failure of a single one does not mean the failure of the entire batch.
+    """
+    subpipe: BasePipe[Input, Output, Metadata]
+    fallback: BasePipe[Input, Output, Metadata]
+    exceptions: type | tuple[type, ...] = Exception
+    enable_batching: bool = False
+    description: str = "FallbackPipe"
+
+    def apply(self, data: Input, metadata: Metadata) -> Output:
+        try:
+            return self.subpipe.apply(data, metadata)
+        except Exception as e:
+            if isinstance(e, self.exceptions):
+                return self.fallback.apply(data, metadata)
+
+            else:
+                raise e
+
+    def batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        if self.enable_batching:
+            try:
+                return self.subpipe.batch_apply(data, metadata)
+            except Exception as e:
+                if isinstance(e, self.exceptions):
+                    return self.fallback.batch_apply(data, metadata)
+
+                else:
+                    raise e
+
+        else:
+            # Pipe.batch_apply() implementation just calls apply multiple times in sequence
+            return super().batch_apply(data, metadata)
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=f"{self.description} (enable_batching={self.enable_batching})")
+
+    def is_wrapper(self) -> bool:
+        return True
+
+    def to_graph(self) -> Graph:
+        graph = super().to_graph()
+        graph_node = graph.nodes[0]  # Pipe.to_graph() only adds one node (with a subgraph)
+        fallback_graph = self.fallback.to_graph()
+        return (
+            # This joins the graphs so that the inputs and outputs of both are
+            # the inputs and outputs of the new graph
+            (graph | fallback_graph)
+
+            # Add a connection between the node containing the subpipe as a subgraph and the fallback graph
+            .add(connections=tuple(
+                GraphConnection(graph_node.id, fallback_input, label="On failure")
+                for fallback_input in fallback_graph.inputs
+            ))
+
+            # Set the inputs to be the inputs of graph, so that fallback's inputs are
+            # not inputs of the resulting graph
+            ._replace(
+                inputs=graph.inputs,
+            )
+        )
+
