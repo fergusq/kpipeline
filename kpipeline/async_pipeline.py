@@ -456,14 +456,14 @@ class AsyncRetryPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata]
         return True
 
 
-async def _callcc[T](f: Callable[[Callable[[T]]]]) -> T:
+async def _callcc[T](f: Callable[[Callable[[T], None]], None]) -> T:
     """
     Emulates how JavaScript's Promise callback works.
     Not really like Lisp's call/cc since you cannot call the continuation multiple times.
     """
     future = asyncio.get_event_loop().create_future()
 
-    def continuation(value: T):
+    def continuation(value: T) -> None:
         if not future.done():
             future.set_result(value)
 
@@ -483,7 +483,7 @@ class AsyncBatchCollectorPipe[Input, Output, Metadata: Hashable](AsyncPipe[Input
     subpipe: SyncOrAsyncPipe[Input, Output, Metadata]
     time: float
 
-    _accumulated_batch: list[tuple[Input, Metadata, Callable[[Output]]]]
+    _accumulated_batch: list[tuple[Input, Metadata, Callable[[Output], None]]]
     _lock: asyncio.Lock
     _timer_task: asyncio.Task
 
@@ -496,17 +496,17 @@ class AsyncBatchCollectorPipe[Input, Output, Metadata: Hashable](AsyncPipe[Input
 
     async def apply(self, data: Input, metadata: Metadata) -> Output:
         async with self._lock:
-            def add_task(continuation: Callable[[Output]]):
+            def add_task(continuation: Callable[[Output], None]):
                 self._accumulated_batch.append((data, metadata, continuation))
 
             task = _callcc(add_task)
 
         return await task
 
-    async def _timer(self):
+    async def _timer(self) -> None:
         await asyncio.sleep(self.time)
         async with self._lock:
-            grouped_by_metadata: defaultdict[Metadata, list[tuple[Input, Callable[[Output]]]]] = defaultdict(list)
+            grouped_by_metadata: defaultdict[Metadata, list[tuple[Input, Callable[[Output], None]]]] = defaultdict(list)
             for data, metadata, continuation in self._accumulated_batch:
                 grouped_by_metadata[metadata].append((data, continuation))
 
