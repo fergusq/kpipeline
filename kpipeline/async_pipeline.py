@@ -1,5 +1,6 @@
 import asyncio
-from collections.abc import Awaitable, Mapping, Sequence
+from collections import defaultdict
+from collections.abc import Awaitable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -454,3 +455,67 @@ class AsyncRetryPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata]
     def is_wrapper(self) -> bool:
         return True
 
+
+async def _callcc[T](f: Callable[[Callable[[T]]]]) -> T:
+    """
+    Emulates how JavaScript's Promise callback works.
+    Not really like Lisp's call/cc since you cannot call the continuation multiple times.
+    """
+    future = asyncio.get_event_loop().create_future()
+
+    def continuation(value: T):
+        if not future.done():
+            future.set_result(value)
+
+    if asyncio.iscoroutinefunction(f):
+        await f(continuation)
+    else:
+        f(continuation)
+
+    return await future
+
+
+class AsyncBatchCollectorPipe[Input, Output, Metadata: Hashable](AsyncPipe[Input, Output, Metadata]):
+    """
+    Forms a batch from multiple inputs it receives in short time and
+    processes it using the batch apply of its subpipe.
+    """
+    subpipe: SyncOrAsyncPipe[Input, Output, Metadata]
+    time: float
+
+    _accumulated_batch: list[tuple[Input, Metadata, Callable[[Output]]]]
+    _lock: asyncio.Lock
+    _timer_task: asyncio.Task
+
+    def __init__(self, subpipe: SyncOrAsyncPipe[Input, Output, Metadata], time: float):
+        self.subpipe = subpipe
+        self.time = time
+        self._accumulated_batch = []
+        self._lock = asyncio.Lock()
+        self._timer_task = asyncio.create_task(self._timer())
+
+    async def apply(self, data: Input, metadata: Metadata) -> Output:
+        async with self._lock:
+            def add_task(continuation: Callable[[Output]]):
+                self._accumulated_batch.append((data, metadata, continuation))
+
+            task = _callcc(add_task)
+
+        return await task
+
+    async def _timer(self):
+        await asyncio.sleep(self.time)
+        async with self._lock:
+            grouped_by_metadata: defaultdict[Metadata, list[tuple[Input, Callable[[Output]]]]] = defaultdict(list)
+            for data, metadata, continuation in self._accumulated_batch:
+                grouped_by_metadata[metadata].append((data, continuation))
+
+            for metadata, values in grouped_by_metadata.items():
+                batch = [data for data, _ in values]
+                results = await _batch_apply(self.subpipe, batch, metadata)
+                for result, (_, continuation) in zip(results, values):
+                    continuation(result)
+
+            self._accumulated_batch = []
+
+        self._timer_task = asyncio.create_task(self._timer())
