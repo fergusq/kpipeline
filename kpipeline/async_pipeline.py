@@ -479,15 +479,23 @@ class AsyncBatchCollectorPipe[Input, Output, Metadata: Hashable](AsyncPipe[Input
     """
     Forms a batch from multiple inputs it receives in short time and
     processes it using the batch apply of its subpipe.
+
+    This is a **stateful** pipe unlike most other pipes.
     """
     subpipe: SyncOrAsyncPipe[Input, Output, Metadata]
     time: float
+    description: str
 
     _accumulated_batch: list[tuple[Input, Metadata, Callable[[Output], None]]]
     _lock: asyncio.Lock
     _timer_task: asyncio.Task
 
-    def __init__(self, subpipe: SyncOrAsyncPipe[Input, Output, Metadata], time: float):
+    def __init__(
+        self,
+        subpipe: SyncOrAsyncPipe[Input, Output, Metadata],
+        time: float,
+        description: str = "Accumulate batches of inputs",
+    ):
         self.subpipe = subpipe
         self.time = time
         self._accumulated_batch = []
@@ -519,3 +527,12 @@ class AsyncBatchCollectorPipe[Input, Output, Metadata: Hashable](AsyncPipe[Input
             self._accumulated_batch = []
 
         self._timer_task = asyncio.create_task(self._timer())
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+    def is_wrapper(self) -> bool:
+        return True
