@@ -21,3 +21,7 @@ class AsyncMultiplyPipe(AsyncPipe[int, int, dict]):
     async def apply(self, data: int, metadata: dict) -> int:
         await asyncio.sleep(0.01)
         return data * 2
+
+class AsyncToStringPipe(Pipe[int, str, dict]):
+    def apply(self, data: int, metadata: dict) -> str:
+        return str(data)

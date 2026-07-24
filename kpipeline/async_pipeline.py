@@ -351,6 +351,43 @@ class AsyncParallelPipe[Input, Output, CombinedOutput, Metadata](AsyncPipe[Input
 
 
 @dataclass(frozen=True)
+class AsyncParallel2Pipe[Input, Output1, Output2, CombinedOutput, Metadata](AsyncPipe[Input, CombinedOutput, Metadata]):
+    """
+    Executes two pipes in parallel on the same input and combines the outputs.
+    The pipes may have different output types.
+    """
+    subpipe1: SyncOrAsyncPipe[Input, Output1, Metadata]
+    subpipe2: SyncOrAsyncPipe[Input, Output2, Metadata]
+    combine: SyncOrAsyncPipeOrCallable[tuple[Output1, Output2], CombinedOutput, Metadata]
+    description: str = ""
+
+    async def apply(self, data: Input, metadata: Metadata) -> CombinedOutput:
+        result1 = _await_or_return(self.subpipe1.apply(data, metadata))
+        result2 = _await_or_return(self.subpipe2.apply(data, metadata))
+
+        gathered: tuple[Output1, Output2] = await asyncio.gather(result1, result2)
+        return await _call_or_apply(self.combine, gathered, metadata)
+
+    async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[CombinedOutput]:
+        results1 = _batch_apply(self.subpipe1, data, metadata)
+        results2 = _batch_apply(self.subpipe2, data, metadata)
+
+        gathered = await asyncio.gather(results1, results2)
+        zipped_results: zip[tuple[Output1, Output2]] = zip(*gathered)
+        return await asyncio.gather(*[_call_or_apply(self.combine, seq, metadata) for seq in zipped_results])
+
+    def to_graph(self) -> Graph:
+        combine_node = self.to_node()._replace(title=self.description or "Combine results", shape="combine", subgraph=self.combine.to_graph() if isinstance(self.combine, Pipe) else None)
+        graph = Graph(nodes=(combine_node,))
+        for subpipe in self.subpipe1, self.subpipe2:
+            subpipe_graph = subpipe.to_graph()
+            graph |= subpipe_graph
+            graph = graph.add(connections=tuple(GraphConnection(o, combine_node.id) for o in subpipe_graph.outputs))
+
+        return graph._replace(outputs=(combine_node.id,))
+
+
+@dataclass(frozen=True)
 class AsyncMetadataWrapperPipe[Input, Output, OuterMetadata, InnerMetadata](AsyncPipe[Input, Output, OuterMetadata]):
     """
     Executes a pipe with changed metadata.

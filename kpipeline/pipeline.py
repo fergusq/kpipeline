@@ -355,6 +355,40 @@ class ParallelPipe[Input, Output, CombinedOutput, Metadata](Pipe[Input, Combined
 
 
 @dataclass(frozen=True)
+class Parallel2Pipe[Input, Output1, Output2, CombinedOutput, Metadata](Pipe[Input, CombinedOutput, Metadata]):
+    """
+    Executes two pipes that may return a different output type and combines the output.
+    The synchronous implementation does not actually execute the pipes in parallel.
+    """
+    subpipe1: BasePipe[Input, Output1, Metadata]
+    subpipe2: BasePipe[Input, Output2, Metadata]
+    combine: PipeOrCallable[tuple[Output1, Output2], CombinedOutput, Metadata]
+    description: str = "Combine results"
+
+    def apply(self, data: Input, metadata: Metadata) -> CombinedOutput:
+        result1 = self.subpipe1.apply(data, metadata)
+        result2 = self.subpipe2.apply(data, metadata)
+        return _call_or_apply(self.combine, (result1, result2), metadata)
+
+    def batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[CombinedOutput]:
+        results1 = self.subpipe1.batch_apply(data, metadata)
+        results2 = self.subpipe2.batch_apply(data, metadata)
+
+        zipped_results: zip[tuple[Output1, Output2]] = zip(results1, results2)
+        return [_call_or_apply(self.combine, seq, metadata) for seq in zipped_results]
+
+    def to_graph(self) -> Graph:
+        combine_node = self.to_node()._replace(title=self.description, shape="combine", subgraph=self.combine.to_graph() if isinstance(self.combine, Pipe) else None)
+        graph = Graph(nodes=(combine_node,))
+        for subpipe in self.subpipe1, self.subpipe2:
+            subpipe_graph = subpipe.to_graph()
+            graph |= subpipe_graph
+            graph = graph.add(connections=tuple(GraphConnection(o, combine_node.id) for o in subpipe_graph.outputs))
+
+        return graph._replace(outputs=(combine_node.id,))
+
+
+@dataclass(frozen=True)
 class MetadataWrapperPipe[Input, Output, OuterMetadata, InnerMetadata](Pipe[Input, Output, OuterMetadata]):
     """
     Executes a pipe with changed metadata.

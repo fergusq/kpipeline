@@ -8,3 +8,7 @@ class SimplePipe(Pipe[int, int, dict]):
 class MultiplyPipe(Pipe[int, int, dict]):
     def apply(self, data: int, metadata: dict) -> int:
         return data * 2
+
+class ToStringPipe(Pipe[int, str, dict]):
+    def apply(self, data: int, metadata: dict) -> str:
+        return str(data)
