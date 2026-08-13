@@ -27,12 +27,14 @@ class GraphNode(NamedTuple):
         if self.subgraph:
             sub_dot = self.subgraph.to_dot(name=None, indent=indent+1)
             node_def = ""
-            node_def += f"""{"  "*indent}subgraph "cluster_{self.id}" {{"""
-            node_def += f"""{"  "*indent}  label="{self.title}";"""
-            node_def += sub_dot
+            node_def += f"""{"  "*indent}subgraph "cluster_{self.id}" {{\n"""
+            node_def += f"""{"  "*indent}  label="{self.title}";\n"""
+            node_def += sub_dot + "\n"
             node_def += "  "*indent + "}"
+
         else:
             node_def = f"""{"  "*indent}"{self.id}" [label="{self.title}", shape={dot_shape}];"""
+
         return node_def
 
 
@@ -95,6 +97,9 @@ class Graph(NamedTuple):
             if node.id == id:
                 return node
 
+            if node.subgraph and (subnode := node.subgraph.get_node(id)):
+                return subnode
+
         return None
 
     def to_dot(self, name: str | None = "g", indent: int = 0) -> str:
@@ -111,8 +116,8 @@ class Graph(NamedTuple):
                 from_nodes = from_node_obj.subgraph.outputs
             else:
                 from_nodes = (conn.from_node,)
-            to_node_obj = self.get_node(conn.to_node)
 
+            to_node_obj = self.get_node(conn.to_node)
             if to_node_obj is not None and to_node_obj.subgraph is not None:
                 to_nodes = to_node_obj.subgraph.inputs
             else:
