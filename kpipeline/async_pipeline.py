@@ -450,6 +450,35 @@ class AsyncMapPipe[Input, Output, Metadata](AsyncPipe[Sequence[Input], Sequence[
 
 
 @dataclass(frozen=True)
+class AsyncFlatMapPipe[Input, Output, Metadata](AsyncPipe[Sequence[Input], Sequence[Output], Metadata]):
+    """
+    Maps a sequence of input objects into a flattened sequence of output objects with a subpipe.
+
+    The subpipe transforms each Input into a Sequence[Output], and the results are concatenated.
+    Does NOT allow the subpipe to be a callable: this is intentional, functions that transforms Inputs to Outputs should be pipes.
+    """
+    subpipe: SyncOrAsyncPipe[Input, Sequence[Output], Metadata]
+    description: str = "FlatMap"
+
+    async def apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        combined_results = await _batch_apply(self.subpipe, data, metadata)
+        return [output for seq in combined_results for output in seq]
+
+    async def async_batch_apply(self, data: Sequence[Sequence[Input]], metadata: Metadata) -> Sequence[Sequence[Output]]:
+        result: list[Sequence[Output]] = []
+        for batch in data:
+            batch_results = await _batch_apply(self.subpipe, batch, metadata)
+            result.append([output for seq in batch_results for output in seq])
+        return result
+
+    def get_subgraph(self) -> Optional[Graph]:
+        return self.subpipe.to_graph()
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description)
+
+
+@dataclass(frozen=True)
 class AsyncFilterPipe[Input, Metadata](AsyncPipe[Sequence[Input], Sequence[Input], Metadata]):
     """
     Filters a sequence of input object with a predicate.
