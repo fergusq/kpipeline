@@ -600,3 +600,61 @@ class FallbackPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
             )
         )
 
+
+@dataclass(frozen=True)
+class WrapperPipe[Input, InnerInput, InnerOutput, Output, Metadata](Pipe[Input, Output, Metadata]):
+    """
+    Wraps a pipe with input and output transformations.
+    """
+    subpipe: Pipe[InnerInput, InnerOutput, Metadata]
+    extract: PipeOrCallable[Input, InnerInput, Metadata]
+    wrap: PipeOrCallable[tuple[Input, InnerOutput], Output, Metadata]
+    extract_description: str | None = "Extract data"
+    description: str = "Wrap data"
+
+    def apply(self, data: Input, metadata: Metadata) -> Output:
+        inner_data = _call_or_apply(self.extract, data, metadata)
+        inner_output = self.subpipe.apply(inner_data, metadata)
+        output = _call_or_apply(self.wrap, (data, inner_output), metadata)
+        return output
+
+    def batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
+        inner_data = [_call_or_apply(self.extract, d, metadata) for d in data]
+        inner_output = self.subpipe.batch_apply(inner_data, metadata)
+        output = [_call_or_apply(self.wrap, (d, io), metadata) for d, io in zip(data, inner_output)]
+        return output
+
+    def to_node(self) -> GraphNode:
+        return super().to_node()._replace(title=self.description, shape="combine", subgraph=self.wrap.to_graph() if isinstance(self.wrap, Pipe) else None)
+
+    def get_subgraph(self) -> Graph | None:
+        return self.subpipe.to_graph()
+
+    def is_wrapper(self) -> bool:
+        return True
+
+    def to_graph(self) -> Graph:
+        combine_node = self.to_node()
+        graph = Graph(nodes=(combine_node,))
+        subpipe_graph = self.subpipe.to_graph()
+        if isinstance(self.extract, Pipe):
+            extract_graph = self.extract.to_graph()
+            subpipe_graph = extract_graph >> subpipe_graph
+
+        elif self.extract_description is not None:
+            extract_node = GraphNode(id=combine_node.id + "_extract", title=self.extract_description)
+            extract_graph = Graph(
+                nodes=(extract_node,),
+                connections=(),
+                inputs=(extract_node.id,),
+                outputs=(extract_node.id,)
+            )
+            subpipe_graph = extract_graph >> subpipe_graph
+
+        graph |= subpipe_graph
+        graph = graph.add(connections=tuple(GraphConnection(o, combine_node.id) for o in subpipe_graph.outputs))
+
+        return graph._replace(
+            inputs=graph.inputs + (combine_node.id,),
+            outputs=(combine_node.id,)
+        )
