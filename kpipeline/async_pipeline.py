@@ -1,10 +1,26 @@
+# This file is part of kpipeline.
+#
+# Copyright (c) 2026 Iikka Hauhio
+#
+# kpipeline is free software: you can redistribute it and/or modify it under
+# the terms of the GNU Lesser General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option)
+# any later version.
+#
+# kpipeline is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with kpipeline. If not, see <https://www.gnu.org/licenses/>.
+
 import asyncio
 from collections import defaultdict
-from collections.abc import Awaitable, Hashable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
-from .graph import Graph, GraphNode, GraphConnection
+from .graph import Graph, GraphConnection, GraphNode
 from .pipeline import BasePipe, Pipe
 
 
@@ -58,7 +74,7 @@ async def _call_or_apply[I, O, M](f: SyncOrAsyncPipeOrCallable[I, O, M], d: I, m
 async def _batch_apply[I, O, M](p: SyncOrAsyncPipe[I, O, M], d: Sequence[I], m: M) -> Sequence[O]:
     if isinstance(p, AsyncPipe):
         return await p.async_batch_apply(d, m)
-    
+
     else:
         return p.batch_apply(d, m)
 
@@ -196,7 +212,7 @@ class AsyncBranchPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata
             if cond:
                 ans.append(then_batch[t])
                 t += 1
-            
+
             else:
                 ans.append(else_batch[e])
                 e += 1
@@ -246,13 +262,13 @@ class AsyncConditionalPipe[InputOutput, Metadata](AsyncPipe[InputOutput, InputOu
             if cond:
                 ans.append(then_batch[t])
                 t += 1
-            
+
             else:
                 ans.append(data[i])
 
         return ans
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -286,7 +302,7 @@ class AsyncSelectPipe[Input, Output, Metadata, Key](AsyncPipe[Input, Output, Met
         batches: dict[Key, list[tuple[int, Input]]] = {key: [] for key in unique_keys}
         for i, (key, item) in enumerate(zip(keys, data)):
             batches[key].append((i, item))
-        
+
         batch_futures: list[Awaitable[Sequence[Output]]] = []
         for key in unique_keys:
             pipe = self.subpipes.get(key, self.otherwise_pipe)
@@ -401,7 +417,7 @@ class AsyncMetadataWrapperPipe[Input, Output, OuterMetadata, InnerMetadata](Asyn
     async def apply(self, data: Input, metadata: OuterMetadata) -> Output:
         return await _await_or_return(self.subpipe.apply(data, await _await_or_return(self.to_inner(metadata))))
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -442,7 +458,7 @@ class AsyncMapPipe[Input, Output, Metadata](AsyncPipe[Sequence[Input], Sequence[
 
         return separated_results
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -471,7 +487,7 @@ class AsyncFlatMapPipe[Input, Output, Metadata](AsyncPipe[Sequence[Input], Seque
             result.append([output for seq in batch_results for output in seq])
         return result
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -489,7 +505,7 @@ class AsyncFilterPipe[Input, Metadata](AsyncPipe[Sequence[Input], Sequence[Input
     async def apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Input]:
         return [i for i in data if await _call_or_apply(self.predicate, i, metadata)]
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.predicate.to_graph() if isinstance(self.predicate, BasePipe) else None
 
     def to_node(self) -> GraphNode:
@@ -514,13 +530,13 @@ class AsyncRetryPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadata]
 
             except Exception as e:
                 if not isinstance(e, self.exceptions):
-                    raise e
+                    raise
 
                 attempt += 1
                 if attempt > self.retries:
-                    raise e
+                    raise
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -555,7 +571,7 @@ class AsyncFallbackPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metada
                 return await _await_or_return(self.fallback.apply(data, metadata))
 
             else:
-                raise e
+                raise
 
     async def async_batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
         if self.enable_batching:
@@ -566,13 +582,13 @@ class AsyncFallbackPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metada
                     return await _batch_apply(self.fallback, data, metadata)
 
                 else:
-                    raise e
+                    raise
 
         else:
             # AsyncPipe.batch_apply() implementation just calls apply multiple times in sequence
             return await super().async_batch_apply(data, metadata)
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -710,13 +726,13 @@ class AsyncBatchCollectorPipe[Input, Output, Metadata: Hashable](AsyncPipe[Input
                     if not future.done():
                         future.set_result(result)
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 # If batch processing fails, propagate the error to all waiters
                 for future in futures:
                     if not future.done():
                         future.set_exception(e)
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -761,7 +777,7 @@ class AsyncSemaphorePipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metad
             try:
                 results = await self.subpipe.async_batch_apply(data, metadata)
                 error = None
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 # We must release the lock even in case of failure, so error is not raised here
                 error = e
                 results = None
@@ -790,7 +806,7 @@ class AsyncSemaphorePipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metad
 
             return combined_results
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -830,7 +846,7 @@ class AsyncTimeoutPipe[Input, Output, Metadata](AsyncPipe[Input, Output, Metadat
             # AsyncPipe.batch_apply() implementation just calls apply multiple times in sequence
             return await super().async_batch_apply(data, metadata)
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -866,7 +882,7 @@ class AsyncWrapperPipe[Input, InnerInput, InnerOutput, Output, Metadata](AsyncPi
     def to_node(self) -> GraphNode:
         return super().to_node()._replace(title=self.description, shape="combine", subgraph=self.wrap.to_graph() if isinstance(self.wrap, BasePipe) else None)
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def is_wrapper(self) -> bool:

@@ -1,9 +1,25 @@
-from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import Callable, Iterable, NamedTuple, Optional
+# This file is part of kpipeline.
+#
+# Copyright (c) 2026 Iikka Hauhio
+#
+# kpipeline is free software: you can redistribute it and/or modify it under
+# the terms of the GNU Lesser General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option)
+# any later version.
+#
+# kpipeline is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with kpipeline. If not, see <https://www.gnu.org/licenses/>.
 
-from .graph import Graph, GraphNode, GraphConnection
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+
+from .graph import Graph, GraphConnection, GraphNode
 
 
 class BasePipe[Input, Output, Metadata](ABC):
@@ -33,7 +49,7 @@ class BasePipe[Input, Output, Metadata](ABC):
     def to_node(self) -> GraphNode:
         return GraphNode(id=str(id(self)), type=type(self), title=type(self).__name__)
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return None
 
     def is_wrapper(self) -> bool:
@@ -201,7 +217,7 @@ class BranchPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
             if cond:
                 ans.append(then_batch[t])
                 t += 1
-            
+
             else:
                 ans.append(else_batch[e])
                 e += 1
@@ -251,13 +267,13 @@ class ConditionalPipe[InputOutput, Metadata](Pipe[InputOutput, InputOutput, Meta
             if cond:
                 ans.append(then_batch[t])
                 t += 1
-            
+
             else:
                 ans.append(data[i])
 
         return ans
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -291,7 +307,7 @@ class SelectPipe[Input, Output, Metadata, Key](Pipe[Input, Output, Metadata]):
         batches: dict[Key, list[tuple[int, Input]]] = {key: [] for key in unique_keys}
         for i, (key, item) in enumerate(zip(keys, data)):
             batches[key].append((i, item))
-        
+
         batch_results: list[Sequence[Output]] = []
         for key in unique_keys:
             pipe = self.subpipes.get(key, self.otherwise_pipe)
@@ -402,7 +418,7 @@ class MetadataWrapperPipe[Input, Output, OuterMetadata, InnerMetadata](Pipe[Inpu
     def apply(self, data: Input, metadata: OuterMetadata) -> Output:
         return self.subpipe.apply(data, self.to_inner(metadata))
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -439,7 +455,7 @@ class MapPipe[Input, Output, Metadata](Pipe[Sequence[Input], Sequence[Output], M
 
         return separated_results
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -468,7 +484,7 @@ class FlatMapPipe[Input, Output, Metadata](Pipe[Sequence[Input], Sequence[Output
             result.append([output for seq in batch_results for output in seq])
         return result
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -486,7 +502,7 @@ class FilterPipe[Input, Metadata](Pipe[Sequence[Input], Sequence[Input], Metadat
     def apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Input]:
         return [i for i in data if _call_or_apply(self.predicate, i, metadata)]
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.predicate.to_graph() if isinstance(self.predicate, Pipe) else None
 
     def to_node(self) -> GraphNode:
@@ -511,13 +527,13 @@ class RetryPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
 
             except Exception as e:
                 if not isinstance(e, self.exceptions):
-                    raise e
+                    raise
 
                 attempt += 1
                 if attempt > self.retries:
-                    raise e
+                    raise
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
@@ -552,7 +568,7 @@ class FallbackPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
                 return self.fallback.apply(data, metadata)
 
             else:
-                raise e
+                raise
 
     def batch_apply(self, data: Sequence[Input], metadata: Metadata) -> Sequence[Output]:
         if self.enable_batching:
@@ -563,13 +579,13 @@ class FallbackPipe[Input, Output, Metadata](Pipe[Input, Output, Metadata]):
                     return self.fallback.batch_apply(data, metadata)
 
                 else:
-                    raise e
+                    raise
 
         else:
             # Pipe.batch_apply() implementation just calls apply multiple times in sequence
             return super().batch_apply(data, metadata)
 
-    def get_subgraph(self) -> Optional[Graph]:
+    def get_subgraph(self) -> Graph | None:
         return self.subpipe.to_graph()
 
     def to_node(self) -> GraphNode:
