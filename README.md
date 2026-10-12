@@ -44,6 +44,7 @@ Currently, the library defines these primitives:
 |`SelectPipe`|Execute one of multiple pipes based on a selector key|
 |`ParallelPipe`|Execute multiple pipes and combine their results (only async implementation is actually parallel)|
 |`MetadataWrapperPipe`|Transform the metadata given to the pipeline for the subpipe|
+|`WrapperPipe`|Wrap a pipe so that its input is extracted from the outer input and its output is combined with the outer input|
 |`MapPipe`|Apply a subpipe into a sequence of inputs|
 |`FilterPipe`|Filter a sequence of inputs using a predicate|
 |`RetryPipe`|Run a pipe multiple times in case it fails|
